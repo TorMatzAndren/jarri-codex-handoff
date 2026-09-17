@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def clipboard_command():
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        return ["wl-copy"]
+
+    if os.environ.get("DISPLAY") and shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+
+    if os.environ.get("DISPLAY") and shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+
+    if shutil.which("wl-copy"):
+        return ["wl-copy"]
+
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+
+    return None
+
+
+def copy_text(text):
+    command = clipboard_command()
+
+    if not command:
+        print(
+            "catcopy: no clipboard backend found.\n"
+            "Install one of: wl-clipboard, xclip, xsel",
+            file=sys.stderr,
+        )
+        return 3
+
+    result = subprocess.run(
+        command,
+        input=text,
+        text=True,
+    )
+
+    return result.returncode
+
+
+def renderer():
+    path = shutil.which("codex-handoff-render")
+
+    if not path:
+        print(
+            "catcopy: codex-handoff-render is not installed",
+            file=sys.stderr,
+        )
+        raise SystemExit(127)
+
+    return path
+
+
+def transport_header(label):
+    return (
+        "===== TRANSPORT HEADER (NOT PART OF FILE) =====\n"
+        f"PATH: {label}\n"
+        "NOTE: Do NOT include this header in any saved documents.\n"
+        "===============================================\n"
+    )
+
+
+def copy_thisrepo(args):
+    if args and args[0] == "list":
+        return subprocess.run(
+            [renderer(), "--list"],
+            text=True,
+        ).returncode
+
+    selection = "0"
+
+    if args:
+        selection = args[0]
+
+    result = subprocess.run(
+        [renderer(), selection],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        return result.returncode
+
+    text = (
+        transport_header(f"CODEX:thisrepo:{selection}")
+        + result.stdout
+    )
+
+    status = copy_text(text)
+
+    if status == 0:
+        print(
+            f"Copied Codex session {selection} "
+            f"for current repository."
+        )
+
+    return status
+
+
+def read_file(path):
+    return Path(path).read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def main():
+    args = sys.argv[1:]
+
+    if args and args[0] == "thisrepo":
+        return copy_thisrepo(args[1:])
+
+    if not args:
+        if sys.stdin.isatty():
+            print(
+                "Usage:\n"
+                "  catcopy FILE\n"
+                "  catcopy -\n"
+                "  c thisrepo\n"
+                "  c thisrepo 1\n"
+                "  c thisrepo list",
+                file=sys.stderr,
+            )
+            return 2
+
+        text = sys.stdin.read()
+        return copy_text(text)
+
+    chunks = []
+
+    for arg in args:
+        if arg == "-":
+            chunks.append(sys.stdin.read())
+            continue
+
+        path = Path(arg)
+
+        if not path.is_file():
+            print(
+                f"catcopy: not a file: {arg}",
+                file=sys.stderr,
+            )
+            return 2
+
+        chunks.append(
+            transport_header(str(path.resolve()))
+            + read_file(path)
+        )
+
+    text = "\n".join(chunks)
+    status = copy_text(text)
+
+    if status == 0:
+        print(
+            f"Copied {len(text.encode('utf-8'))} bytes "
+            f"from {len(chunks)} source(s)."
+        )
+
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

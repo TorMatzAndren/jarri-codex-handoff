@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def git_root():
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except Exception:
+        return Path.cwd().resolve()
+
+
+def session_meta(path):
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+
+                if obj.get("type") != "session_meta":
+                    continue
+
+                payload = obj.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+
+                cwd = payload.get("cwd")
+                if not cwd:
+                    return None
+
+                return payload
+    except OSError:
+        return None
+
+    return None
+
+
+def belongs_to_repo(cwd, repo):
+    try:
+        Path(cwd).resolve().relative_to(repo)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def find_sessions(repo):
+    sessions_root = Path.home() / ".codex" / "sessions"
+    found = []
+
+    if not sessions_root.exists():
+        return found
+
+    for path in sessions_root.rglob("rollout-*.jsonl"):
+        meta = session_meta(path)
+        if not meta:
+            continue
+
+        cwd = meta.get("cwd")
+        if not cwd or not belongs_to_repo(cwd, repo):
+            continue
+
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue
+
+        found.append((mtime, path, meta))
+
+    found.sort(key=lambda x: x[0], reverse=True)
+    return found
+
+
+def content_text(content):
+    parts = []
+
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("type") in {"input_text", "output_text"}:
+                text = item.get("text")
+                if text:
+                    parts.append(text)
+
+    return "\n".join(parts)
+
+
+def tool_output_text(output):
+    if isinstance(output, str):
+        return output
+
+    parts = []
+
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+
+            text = item.get("text")
+            if text:
+                parts.append(text)
+
+    return "\n".join(parts)
+
+
+def render(path, meta, repo):
+    records = []
+
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            if obj.get("type") != "response_item":
+                continue
+
+            payload = obj.get("payload")
+            if not isinstance(payload, dict):
+                continue
+
+            ptype = payload.get("type")
+
+            if ptype == "reasoning":
+                continue
+
+            if ptype == "message":
+                role = payload.get("role")
+
+                if role not in {"user", "assistant"}:
+                    continue
+
+                text = content_text(payload.get("content"))
+
+                if not text:
+                    continue
+
+                if (
+                    role == "user"
+                    and text.lstrip().startswith("<environment_context>")
+                ):
+                    continue
+
+                label = role.upper()
+                phase = payload.get("phase")
+
+                if role == "assistant" and phase:
+                    label += f" [{phase}]"
+
+                records.append((label, text.rstrip()))
+                continue
+
+            if ptype == "custom_tool_call":
+                name = payload.get("name", "tool")
+                raw = payload.get("input", "")
+                records.append(
+                    (f"TOOL CALL [{name}]", str(raw).rstrip())
+                )
+                continue
+
+            if ptype == "custom_tool_call_output":
+                text = tool_output_text(payload.get("output"))
+                records.append(("TOOL OUTPUT", text.rstrip()))
+                continue
+
+            if ptype == "function_call":
+                name = payload.get("name", "function")
+                arguments = payload.get("arguments", "")
+                records.append(
+                    (f"FUNCTION CALL [{name}]", str(arguments).rstrip())
+                )
+                continue
+
+            if ptype == "function_call_output":
+                output = payload.get("output", "")
+                records.append(
+                    ("FUNCTION OUTPUT", str(output).rstrip())
+                )
+                continue
+
+            # Preserve unknown semantic response items rather than silently
+            # losing evidence if Codex evolves its rollout schema.
+            if ptype:
+                records.append(
+                    (
+                        f"RESPONSE ITEM [{ptype}]",
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                    )
+                )
+
+    out = []
+
+    out.append("===== CODEX SESSION =====")
+    out.append(f"session-file: {path}")
+    out.append(
+        f"session-id: {meta.get('session_id', meta.get('id', 'unknown'))}"
+    )
+    out.append(f"timestamp: {meta.get('timestamp', 'unknown')}")
+    out.append(f"cwd: {meta.get('cwd', 'unknown')}")
+    out.append(f"cli-version: {meta.get('cli_version', 'unknown')}")
+    out.append(f"repo-root: {repo}")
+    out.append("=========================")
+
+    for label, text in records:
+        out.append("")
+        out.append(f"===== {label} =====")
+
+        if text:
+            out.append(text)
+
+    return "\n".join(out) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Project Codex JSONL sessions into a clean handoff transcript."
+    )
+    parser.add_argument(
+        "selection",
+        nargs="?",
+        default="0",
+        help="0=newest, 1=previous, etc.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List Codex sessions for the current repository.",
+    )
+
+    args = parser.parse_args()
+
+    repo = git_root()
+    sessions = find_sessions(repo)
+
+    if not sessions:
+        print(
+            f"No Codex sessions found for repository: {repo}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.list:
+        for index, (_, path, meta) in enumerate(sessions):
+            print(
+                f"{index:3}  "
+                f"{meta.get('timestamp', 'unknown'):24}  "
+                f"{meta.get('cli_version', '?'):8}  "
+                f"{path}"
+            )
+        return 0
+
+    try:
+        index = int(args.selection)
+    except ValueError:
+        print(
+            f"Invalid session index: {args.selection}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if index < 0 or index >= len(sessions):
+        print(
+            f"Session index {index} does not exist "
+            f"(available: 0..{len(sessions)-1})",
+            file=sys.stderr,
+        )
+        return 2
+
+    _, path, meta = sessions[index]
+    sys.stdout.write(render(path, meta, repo))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
