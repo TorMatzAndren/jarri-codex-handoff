@@ -266,8 +266,12 @@ The rendered transcript preserved:
 
 Version 0.2.5 additionally adds automatic per-turn clipboard handoff.
 
-The 0.2.5 runtime has been tested for:
+Version 0.2.5 was clean-room verified on Debian 13 using the built release
+artifacts.
 
+Verification covered:
+
+- upgrade from the packaged 0.2.3 release to 0.2.5
 - real `agent-turn-complete` notification delivery
 - automatic clipboard update while Codex remains open
 - complete current-turn data being present in persisted JSONL when notify fires
@@ -275,8 +279,12 @@ The 0.2.5 runtime has been tested for:
 - clean Codex configuration
 - idempotent repeated `codex-shell` configuration
 - preservation of an existing foreign `notify` setting
+- installed `/usr/bin/codex-shell` launching upstream Codex 0.154.0
+- installed `/usr/bin/codex-handoff-notify` handling the completed turn
+- installed repo-scoped renderer recovering the real persisted Codex turn
+- clipboard backend invocation verified with a controlled `xclip` sink
 
-Final release artifacts should be clean-room tested before publication.
+The real desktop X11 clipboard path was also verified separately.
 
 ## Compatibility
 
