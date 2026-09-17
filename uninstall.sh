@@ -8,6 +8,7 @@ rm -f \
     "$BINDIR/c" \
     "$BINDIR/catcopy" \
     "$BINDIR/codex-handoff-render" \
+    "$BINDIR/codex-handoff-notify" \
     "$BINDIR/codex-shell"
 
 echo "Jarri Codex Handoff removed from $BINDIR"

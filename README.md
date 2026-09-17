@@ -7,12 +7,17 @@ repo-scoped handoff transcript suitable for another model or for archival.
 
 ~~~bash
 codex-shell
-# do work in Codex, then exit
-
-c thisrepo
 ~~~
 
-Useful variants:
+Work normally in Codex.
+
+After each completed Codex turn, the current repo-scoped handoff transcript is
+automatically copied to the clipboard.
+
+You can then paste it directly into another model or application without
+exiting Codex.
+
+Manual and historical handoff controls remain available:
 
 ~~~bash
 c thisrepo        # newest Codex session for this repository
@@ -39,13 +44,22 @@ It:
 - renders assistant commentary and final responses
 - preserves tool calls and tool outputs
 - excludes reasoning records
-- copies the rendered transcript to the clipboard via `c thisrepo`
+- copies the rendered transcript to the clipboard automatically after each
+  completed Codex turn
+- keeps manual and historical session selection available through `c thisrepo`
+
+`thisrepo` is intentionally strict. It must be run from inside a Git
+repository. Non-Git directories such as `/`, `$HOME`, or `/tmp` are not
+treated as implicit repository roots.
 
 ## Commands
 
 ### `codex-shell`
 
-Launches the normal upstream Codex CLI and ensures:
+`codex-shell` is the supported launcher for the integration.
+
+It launches the normal upstream Codex CLI and ensures these terminal
+presentation settings:
 
 ~~~toml
 [tui]
@@ -53,10 +67,49 @@ raw_output_mode = true
 alternate_screen = "never"
 ~~~
 
-Existing Codex configuration is preserved.
+It also configures Codex's turn-complete notification hook:
 
-These settings affect terminal presentation only. The handoff renderer reads
-Codex's persisted JSONL session history directly.
+~~~text
+codex-handoff-notify
+~~~
+
+The notification hook reacts to:
+
+~~~text
+agent-turn-complete
+~~~
+
+and copies the current repo-scoped Codex transcript to the clipboard.
+
+Codex itself remains the upstream Codex executable. Jarri Codex Handoff does
+not replace or modify the Codex program.
+
+If no `notify` setting exists, `codex-shell` configures the Jarri handoff hook.
+
+If the Jarri hook is already configured, the operation is idempotent.
+
+If another tool already owns the Codex `notify` setting, that setting is
+preserved and automatic Jarri handoff is not enabled. `codex-shell` reports
+the conflict instead of silently replacing another integration.
+
+Other Codex configuration is preserved except for the two documented `[tui]`
+settings above, which `codex-shell` deliberately ensures.
+
+### `codex-handoff-notify`
+
+Internal turn-complete notification helper used by `codex-shell`.
+
+It:
+
+- accepts the Codex notification JSON payload
+- ignores events other than `agent-turn-complete`
+- ignores missing or unusable working directories
+- ignores working directories outside Git repositories
+- invokes the package's `catcopy thisrepo` path
+
+The automatic path calls `catcopy` directly rather than relying on the short
+`c` command, so shell aliases or functions named `c` cannot interfere with
+turn-complete handoff.
 
 ### `codex-handoff-render`
 
@@ -68,9 +121,14 @@ codex-handoff-render 1
 codex-handoff-render --list
 ~~~
 
+The renderer is the owner of Git-repository validation and Codex session
+selection.
+
 ### `catcopy` / `c`
 
 `c` is a thin symlink to `catcopy`.
+
+Normal clipboard use:
 
 ~~~bash
 c file.txt
@@ -85,19 +143,22 @@ c thisrepo 1
 c thisrepo list
 ~~~
 
+`catcopy` prefers the `codex-handoff-render` executable installed beside it,
+then falls back to normal `PATH` resolution.
+
 ## Installation
 
 ### Debian package
 
 ~~~bash
-sudo apt install ./jarri-codex-handoff_0.2.3_all.deb
+sudo apt install ./jarri-codex-handoff_0.2.5_all.deb
 ~~~
 
 ### Portable tarball
 
 ~~~bash
-tar -xzf jarri-codex-handoff-0.2.3.tar.gz
-cd jarri-codex-handoff-0.2.3
+tar -xzf jarri-codex-handoff-0.2.5.tar.gz
+cd jarri-codex-handoff-0.2.5
 sudo ./install.sh
 ~~~
 
@@ -105,6 +166,12 @@ User-local install:
 
 ~~~bash
 PREFIX="$HOME/.local" ./install.sh
+~~~
+
+Then start Codex through:
+
+~~~bash
+codex-shell
 ~~~
 
 ## Dependencies
@@ -126,30 +193,62 @@ Codex itself is not bundled.
 ## Architecture
 
 ~~~text
-Codex CLI
+codex-shell
     |
-    v
-~/.codex/sessions/.../rollout-*.jsonl
+    +--> ensures Codex TUI settings
     |
-    v
-repo-scoped session selection
+    +--> ensures Jarri notify hook
     |
-    v
-semantic transcript rendering
-    |
-    +--> stdout: codex-handoff-render
-    |
-    `--> clipboard: c thisrepo
+    `--> upstream Codex CLI
+             |
+             +--> ~/.codex/sessions/.../rollout-*.jsonl
+             |
+             `--> agent-turn-complete
+                        |
+                        v
+                codex-handoff-notify
+                        |
+                        v
+                Git repository validation
+                        |
+                        v
+                   catcopy thisrepo
+                        |
+                        v
+                codex-handoff-render
+                        |
+                        v
+              repo-scoped session selection
+                        |
+                        v
+              semantic transcript rendering
+                        |
+                        v
+                     clipboard
 ~~~
 
-## Clean-room verification
+Manual rendering remains available independently:
 
-Version 0.2.3 was tested on a fresh Debian 13 VM with no pre-existing Jarri
-tools or Codex configuration.
+~~~text
+codex-handoff-render
+    |
+    `--> stdout
+
+c thisrepo
+    |
+    `--> clipboard
+~~~
+
+## Verification
+
+The original package was clean-room tested on a fresh Debian 13 VM with no
+pre-existing Jarri tools or Codex configuration.
+
+That test covered:
 
 ~~~text
 fresh Debian
--> install .deb
+-> install package
 -> install upstream Codex
 -> codex-shell
 -> real Codex task
@@ -165,15 +264,30 @@ The rendered transcript preserved:
 - tool output
 - final answer
 
+Version 0.2.5 additionally adds automatic per-turn clipboard handoff.
+
+The 0.2.5 runtime has been tested for:
+
+- real `agent-turn-complete` notification delivery
+- automatic clipboard update while Codex remains open
+- complete current-turn data being present in persisted JSONL when notify fires
+- strict failure of `c thisrepo` outside a Git repository
+- clean Codex configuration
+- idempotent repeated `codex-shell` configuration
+- preservation of an existing foreign `notify` setting
+
+Final release artifacts should be clean-room tested before publication.
+
 ## Compatibility
 
-Initially developed and clean-room verified against:
+Initially developed and tested against:
 
 ~~~text
 codex-cli 0.154.0
 ~~~
 
-Codex's persisted JSONL format is upstream behavior and may evolve.
+Codex's persisted JSONL and notification behavior are upstream interfaces and
+may evolve.
 
 ## License
 

@@ -51,6 +51,11 @@ def copy_text(text):
 
 
 def renderer():
+    sibling = Path(__file__).resolve().with_name("codex-handoff-render")
+
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+
     path = shutil.which("codex-handoff-render")
 
     if not path:

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -u
+
+PAYLOAD="${1:-}"
+
+SCRIPT_PATH="$(readlink -f -- "$0")"
+BINDIR="$(dirname -- "$SCRIPT_PATH")"
+CATCOPY="$BINDIR/catcopy"
+
+if [[ ! -x "$CATCOPY" ]]; then
+    echo "codex-handoff-notify: catcopy not found beside notify helper." >&2
+    exit 127
+fi
+
+eval "$(
+    python3 - "$PAYLOAD" <<'PAYLOAD_PY'
+import json
+import shlex
+import sys
+
+try:
+    obj = json.loads(sys.argv[1])
+except Exception:
+    obj = {}
+
+values = {
+    "EVENT_TYPE": obj.get("type", ""),
+    "CWD": obj.get("cwd", ""),
+}
+
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PAYLOAD_PY
+)"
+
+# Codex may grow other notification event types. They are not handoff events.
+if [[ "$EVENT_TYPE" != "agent-turn-complete" ]]; then
+    exit 0
+fi
+
+if [[ -z "$CWD" || ! -d "$CWD" ]]; then
+    exit 0
+fi
+
+# "thisrepo" has a deliberately strict contract.
+if ! git -C "$CWD" rev-parse --show-toplevel >/dev/null 2>&1; then
+    exit 0
+fi
+
+cd "$CWD" || exit 0
+
+exec "$CATCOPY" thisrepo

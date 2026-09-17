@@ -8,6 +8,7 @@ mkdir -p "$BINDIR"
 
 install -m 0755 bin/catcopy "$BINDIR/catcopy"
 install -m 0755 bin/codex-handoff-render "$BINDIR/codex-handoff-render"
+install -m 0755 bin/codex-handoff-notify "$BINDIR/codex-handoff-notify"
 install -m 0755 bin/codex-shell "$BINDIR/codex-shell"
 
 ln -sfn catcopy "$BINDIR/c"
@@ -17,10 +18,12 @@ echo "Installed:"
 echo "  $BINDIR/catcopy"
 echo "  $BINDIR/c"
 echo "  $BINDIR/codex-handoff-render"
+echo "  $BINDIR/codex-handoff-notify"
 echo "  $BINDIR/codex-shell"
 echo
 echo "Run:"
 echo "  codex-shell"
 echo
-echo "Then after Codex exits:"
+echo "Completed Codex turns are copied automatically."
+echo "Manual fallback:"
 echo "  c thisrepo"

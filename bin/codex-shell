@@ -7,27 +7,68 @@ if ! command -v codex >/dev/null 2>&1; then
     exit 127
 fi
 
-if ! command -v c >/dev/null 2>&1; then
-    echo "codex-shell: catcopy/c is not installed correctly." >&2
-    exit 127
-fi
+SCRIPT_PATH="$(readlink -f -- "$0")"
+BINDIR="$(dirname -- "$SCRIPT_PATH")"
+
+HOOK="$BINDIR/codex-handoff-notify"
+CATCOPY="$BINDIR/catcopy"
+RENDERER="$BINDIR/codex-handoff-render"
+
+for required in "$HOOK" "$CATCOPY" "$RENDERER"; do
+    if [[ ! -x "$required" ]]; then
+        echo "codex-shell: required package command is missing: $required" >&2
+        exit 127
+    fi
+done
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CONFIG="$CODEX_HOME/config.toml"
 
 mkdir -p "$CODEX_HOME"
 
-python3 - "$CONFIG" <<'PY'
+CONFIG_RESULT="$(
+python3 - "$CONFIG" "$HOOK" <<'PY'
 from pathlib import Path
+import json
 import re
 import sys
 
 path = Path(sys.argv[1])
+hook = Path(sys.argv[2]).resolve()
 
 if path.exists():
     text = path.read_text(encoding="utf-8")
 else:
     text = ""
+
+# ---------------------------------------------------------------------------
+# Top-level notify ownership
+#
+# Do not silently destroy another tool's notification hook. If a user already
+# owns `notify`, preserve it and report the conflict to codex-shell.
+# ---------------------------------------------------------------------------
+
+desired_notify = f"notify = [{json.dumps(str(hook))}]"
+notify_re = re.compile(r'(?m)^notify\s*=.*$')
+notify_match = notify_re.search(text)
+
+if notify_match:
+    current_notify = notify_match.group(0).strip()
+
+    if current_notify == desired_notify:
+        notify_status = "already-configured"
+    else:
+        notify_status = "conflict"
+else:
+    if text and not text.endswith("\n"):
+        text += "\n"
+
+    text = desired_notify + "\n" + text
+    notify_status = "configured"
+
+# ---------------------------------------------------------------------------
+# TUI presentation
+# ---------------------------------------------------------------------------
 
 section_re = re.compile(
     r'(?ms)^\[tui\]\s*\n(?P<body>.*?)(?=^\[[^\n]+\]\s*$|\Z)'
@@ -76,9 +117,12 @@ else:
     )
 
 path.write_text(text, encoding="utf-8")
-PY
 
-cat <<'BANNER'
+print(notify_status)
+PY
+)"
+
+cat <<BANNER
 Jarri Codex Handoff Shell
 -------------------------
 Codex remains the normal upstream Codex CLI.
@@ -87,7 +131,40 @@ Codex TUI settings ensured:
   raw_output_mode = true
   alternate_screen = "never"
 
-After a Codex task:
+BANNER
+
+case "$CONFIG_RESULT" in
+    configured)
+        cat <<BANNER
+Automatic handoff enabled:
+  each completed Codex turn is copied to the clipboard
+  from the canonical repo-scoped Codex JSONL session.
+
+BANNER
+        ;;
+    already-configured)
+        cat <<BANNER
+Automatic handoff already configured:
+  each completed Codex turn is copied to the clipboard.
+
+BANNER
+        ;;
+    conflict)
+        cat <<BANNER
+Automatic handoff NOT enabled:
+  an existing Codex 'notify' setting was preserved.
+
+Jarri would use:
+  notify = ["$HOOK"]
+
+Resolve that ownership manually if you want automatic handoff.
+
+BANNER
+        ;;
+esac
+
+cat <<'BANNER'
+Manual handoff remains available:
   c thisrepo        copy newest session for this Git repository
   c thisrepo 1      copy previous session
   c thisrepo list   list available repo-local Codex sessions
@@ -95,6 +172,7 @@ After a Codex task:
 Normal catcopy:
   c file.txt
   cat file.txt | c
+
 BANNER
 
 exec codex "$@"
