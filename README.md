@@ -11,8 +11,8 @@ codex-shell
 
 Work normally in Codex.
 
-After each completed Codex turn, the current repo-scoped handoff transcript is
-automatically copied to the clipboard.
+After each completed Codex turn, the transcript for that exact Codex thread
+and completed turn is copied to the clipboard.
 
 You can then paste it directly into another model or application without
 exiting Codex.
@@ -44,8 +44,7 @@ It:
 - renders assistant commentary and final responses
 - preserves tool calls and tool outputs
 - excludes reasoning records
-- copies the rendered transcript to the clipboard automatically after each
-  completed Codex turn
+- supports automatic exact-turn handoff after each completed Codex turn
 - keeps manual and historical session selection available through `c thisrepo`
 
 `thisrepo` is intentionally strict. It must be run from inside a Git
@@ -79,7 +78,7 @@ The notification hook reacts to:
 agent-turn-complete
 ~~~
 
-and copies the current repo-scoped Codex transcript to the clipboard.
+and copies the exact completed turn from the notified Codex thread.
 
 Codex itself remains the upstream Codex executable. Jarri Codex Handoff does
 not replace or modify the Codex program.
@@ -99,13 +98,11 @@ settings above, which `codex-shell` deliberately ensures.
 
 Internal turn-complete notification helper used by `codex-shell`.
 
-It:
-
-- accepts the Codex notification JSON payload
-- ignores events other than `agent-turn-complete`
-- ignores missing or unusable working directories
-- ignores working directories outside Git repositories
-- invokes the package's `catcopy thisrepo` path
+It accepts the Codex notification JSON payload, resolves its exact thread ID
+and completed turn ID in canonical persisted session history, validates the
+payload working directory as a Git repository, and invokes
+`catcopy codex-turn THREAD_ID TURN_ID`. It ignores other event types and
+malformed or unresolved identities.
 
 The automatic path calls `catcopy` directly rather than relying on the short
 `c` command, so shell aliases or functions named `c` cannot interfere with
@@ -119,6 +116,7 @@ Renders a repo-scoped Codex session to stdout.
 codex-handoff-render
 codex-handoff-render 1
 codex-handoff-render --list
+codex-handoff-render --session-id THREAD_ID --through-turn TURN_ID
 ~~~
 
 The renderer is the owner of Git-repository validation and Codex session
@@ -141,6 +139,7 @@ Codex handoff:
 c thisrepo
 c thisrepo 1
 c thisrepo list
+catcopy codex-turn THREAD_ID TURN_ID
 ~~~
 
 `catcopy` prefers the `codex-handoff-render` executable installed beside it,
@@ -212,13 +211,13 @@ codex-shell
                 Git repository validation
                         |
                         v
-                   catcopy thisrepo
+             catcopy codex-turn THREAD_ID TURN_ID
                         |
                         v
                 codex-handoff-render
                         |
                         v
-              repo-scoped session selection
+            exact session and turn resolution
                         |
                         v
               semantic transcript rendering

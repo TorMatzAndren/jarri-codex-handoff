@@ -116,6 +116,25 @@ def copy_thisrepo(args):
     return status
 
 
+def copy_codex_turn(args):
+    if len(args) != 2 or not all(args):
+        print("Usage: catcopy codex-turn THREAD_ID TURN_ID", file=sys.stderr)
+        return 2
+    result = subprocess.run(
+        [renderer(), "--session-id", args[0], "--through-turn", args[1]],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    status = copy_text(transport_header(f"CODEX:thread:{args[0]}:turn:{args[1]}") + result.stdout)
+    if status == 0:
+        print(f"Copied Codex thread {args[0]} through turn {args[1]}.")
+    return status
+
+
 def read_file(path):
     return Path(path).read_text(
         encoding="utf-8",
@@ -128,6 +147,9 @@ def main():
 
     if args and args[0] == "thisrepo":
         return copy_thisrepo(args[1:])
+
+    if args and args[0] == "codex-turn":
+        return copy_codex_turn(args[1:])
 
     if not args:
         if sys.stdin.isatty():

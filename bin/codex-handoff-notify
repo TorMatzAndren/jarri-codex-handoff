@@ -50,6 +50,8 @@ except Exception:
 values = {
     "EVENT_TYPE": obj.get("type", ""),
     "CWD": obj.get("cwd", ""),
+    "THREAD_ID": obj.get("thread-id", ""),
+    "TURN_ID": obj.get("turn-id", ""),
 }
 
 for key, value in values.items():
@@ -57,34 +59,46 @@ for key, value in values.items():
 PAYLOAD_PY
 )"
 
+log_record() {
+    printf '%s pid=%s process_cwd=%q payload_cwd=%q thread_id=%q turn_id=%q %s\n' \
+        "$(date --iso-8601=ns)" "$$" "${PWD:-}" "$CWD" \
+        "$THREAD_ID" "$TURN_ID" "$1" >>"$LOG_FILE" 2>/dev/null || true
+}
+
 # Codex may grow other notification event types. They are not handoff events.
 if [[ "$EVENT_TYPE" != "agent-turn-complete" ]]; then
-    printf '%s pid=%s event=ignored type=%q\n' \
-        "$(date --iso-8601=ns)" "$$" "$EVENT_TYPE" \
-        >>"$LOG_FILE" 2>/dev/null || true
+    log_record "event=ignored type=$EVENT_TYPE status=skip reason=non_agent_turn_complete"
     exit 0
 fi
 
 if [[ -z "$CWD" || ! -d "$CWD" ]]; then
+    log_record "event=ignored status=skip reason=invalid_cwd"
     exit 0
 fi
 
-# "thisrepo" has a deliberately strict contract.
+# The payload directory must identify a Git repository.
 if ! git -C "$CWD" rev-parse --show-toplevel >/dev/null 2>&1; then
+    log_record "event=ignored status=skip reason=not_git_repository"
+    exit 0
+fi
+
+if [[ -z "$THREAD_ID" ]]; then
+    log_record "event=ignored status=skip reason=missing_thread_id"
+    exit 0
+fi
+
+if [[ -z "$TURN_ID" ]]; then
+    log_record "event=ignored status=skip reason=missing_turn_id"
     exit 0
 fi
 
 cd "$CWD" || exit 0
 
-printf '%s pid=%s event=handoff-start repo=%q\n' \
-    "$(date --iso-8601=ns)" "$$" "$CWD" \
-    >>"$LOG_FILE" 2>/dev/null || true
+log_record "event=handoff-start status=running"
 
-"$CATCOPY" thisrepo
+"$CATCOPY" codex-turn "$THREAD_ID" "$TURN_ID"
 STATUS=$?
 
-printf '%s pid=%s event=handoff-finish status=%s\n' \
-    "$(date --iso-8601=ns)" "$$" "$STATUS" \
-    >>"$LOG_FILE" 2>/dev/null || true
+log_record "event=handoff-finish status=$STATUS"
 
 exit "$STATUS"

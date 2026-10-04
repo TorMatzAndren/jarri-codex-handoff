@@ -94,6 +94,46 @@ def find_sessions(repo):
     return found
 
 
+def find_session_by_id(repo, session_id):
+    sessions_root = Path.home() / ".codex" / "sessions"
+    if not sessions_root.exists():
+        return None
+
+    for path in sessions_root.rglob("rollout-*.jsonl"):
+        meta = session_meta(path)
+        if not meta:
+            continue
+        if session_id not in {meta.get("id"), meta.get("session_id")}:
+            continue
+        if not belongs_to_repo(meta.get("cwd", ""), repo):
+            raise SystemExit(
+                f"ERROR: session {session_id} does not belong to repository {repo}."
+            )
+        return path, meta
+    return None
+
+
+def has_completed_turn(path, turn_id):
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                payload = obj.get("payload")
+                if (
+                    obj.get("type") == "event_msg"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "task_complete"
+                    and payload.get("turn_id") == turn_id
+                ):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def content_text(content):
     parts = []
 
@@ -128,7 +168,7 @@ def tool_output_text(output):
     return "\n".join(parts)
 
 
-def render(path, meta, repo):
+def render(path, meta, repo, through_turn=None):
     records = []
 
     with path.open("r", encoding="utf-8") as f:
@@ -137,6 +177,16 @@ def render(path, meta, repo):
                 obj = json.loads(line)
             except Exception:
                 continue
+
+            if through_turn is not None:
+                event_payload = obj.get("payload")
+                if (
+                    obj.get("type") == "event_msg"
+                    and isinstance(event_payload, dict)
+                    and event_payload.get("type") == "task_complete"
+                    and event_payload.get("turn_id") == through_turn
+                ):
+                    break
 
             if obj.get("type") != "response_item":
                 continue
@@ -251,6 +301,8 @@ def main():
         default="0",
         help="0=newest, 1=previous, etc.",
     )
+    parser.add_argument("--session-id")
+    parser.add_argument("--through-turn")
     parser.add_argument(
         "--list",
         action="store_true",
@@ -259,7 +311,23 @@ def main():
 
     args = parser.parse_args()
 
+    if bool(args.session_id) != bool(args.through_turn):
+        parser.error("--session-id and --through-turn must be supplied together")
+
     repo = git_root()
+
+    if args.session_id:
+        match = find_session_by_id(repo, args.session_id)
+        if not match:
+            print(f"No canonical Codex session found for thread: {args.session_id}", file=sys.stderr)
+            return 2
+        path, meta = match
+        if not has_completed_turn(path, args.through_turn):
+            print(f"Turn {args.through_turn} not found in session {args.session_id}", file=sys.stderr)
+            return 2
+        sys.stdout.write(render(path, meta, repo, args.through_turn))
+        return 0
+
     sessions = find_sessions(repo)
 
     if not sessions:
