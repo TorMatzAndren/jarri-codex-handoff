@@ -3,6 +3,30 @@ set -u
 
 PAYLOAD="${1:-}"
 
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/jarri-codex-handoff"
+LOG_FILE="$LOG_DIR/notify.log"
+LOG_BACKUP="$LOG_DIR/notify.log.1"
+LOG_MAX_BYTES=$((1024 * 1024))
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+if [[ -f "$LOG_FILE" ]]; then
+    LOG_SIZE="$(stat -c '%s' "$LOG_FILE" 2>/dev/null || printf '0')"
+
+    if [[ "$LOG_SIZE" =~ ^[0-9]+$ ]] && (( LOG_SIZE >= LOG_MAX_BYTES )); then
+        mv -f -- "$LOG_FILE" "$LOG_BACKUP" 2>/dev/null || true
+    fi
+fi
+
+{
+    printf '%s pid=%s event=invoked payload_bytes=%s cwd=%q display=%q\n' \
+        "$(date --iso-8601=ns)" \
+        "$$" \
+        "${#PAYLOAD}" \
+        "${PWD:-}" \
+        "${DISPLAY:-}"
+} >>"$LOG_FILE" 2>/dev/null || true
+
 SCRIPT_PATH="$(readlink -f -- "$0")"
 BINDIR="$(dirname -- "$SCRIPT_PATH")"
 CATCOPY="$BINDIR/catcopy"
@@ -35,6 +59,9 @@ PAYLOAD_PY
 
 # Codex may grow other notification event types. They are not handoff events.
 if [[ "$EVENT_TYPE" != "agent-turn-complete" ]]; then
+    printf '%s pid=%s event=ignored type=%q\n' \
+        "$(date --iso-8601=ns)" "$$" "$EVENT_TYPE" \
+        >>"$LOG_FILE" 2>/dev/null || true
     exit 0
 fi
 
@@ -49,4 +76,15 @@ fi
 
 cd "$CWD" || exit 0
 
-exec "$CATCOPY" thisrepo
+printf '%s pid=%s event=handoff-start repo=%q\n' \
+    "$(date --iso-8601=ns)" "$$" "$CWD" \
+    >>"$LOG_FILE" 2>/dev/null || true
+
+"$CATCOPY" thisrepo
+STATUS=$?
+
+printf '%s pid=%s event=handoff-finish status=%s\n' \
+    "$(date --iso-8601=ns)" "$$" "$STATUS" \
+    >>"$LOG_FILE" 2>/dev/null || true
+
+exit "$STATUS"
