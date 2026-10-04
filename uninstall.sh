@@ -9,6 +9,8 @@ rm -f \
     "$BINDIR/catcopy" \
     "$BINDIR/codex-handoff-render" \
     "$BINDIR/codex-handoff-notify" \
+    "$BINDIR/codex-handoff-watch" \
+    "$BINDIR/handoff_delivery.py" \
     "$BINDIR/codex-shell"
 
 echo "Jarri Codex Handoff removed from $BINDIR"

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -u
+SCRIPT_PATH="$(readlink -f -- "$0")"
+exec python3 "$(dirname -- "$SCRIPT_PATH")/handoff_delivery.py" watch "$@"

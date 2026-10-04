@@ -11,6 +11,10 @@ codex-shell
 
 Work normally in Codex.
 
+`codex-shell` also starts one per-user `codex-handoff-watch` recovery process;
+the watcher uses a state-directory lock so repeated launches reuse that
+process.
+
 After each completed Codex turn, the transcript for that exact Codex thread
 and completed turn is copied to the clipboard.
 
@@ -72,13 +76,34 @@ It also configures Codex's turn-complete notification hook:
 codex-handoff-notify
 ~~~
 
+`codex-shell` starts the independent recovery observer in the background. To
+start it directly instead, run:
+
+~~~bash
+codex-handoff-watch
+~~~
+
+`codex-handoff-watch --once` performs a bounded startup recovery pass, and
+`codex-handoff-watch --status` shows registry counts. The normal watcher polls
+rollouts once per second. Startup recovery considers only task completions from
+the previous 10 minutes; registry rows older than 180 days are pruned.
+
+The canonical rollout JSONL under `~/.codex/sessions/` is the completion truth.
 The notification hook reacts to:
 
 ~~~text
 agent-turn-complete
 ~~~
 
-and copies the exact completed turn from the notified Codex thread.
+and is the fast path for copying that exact completed turn. The standalone
+watcher is the recovery path for persisted completions that lack a successful
+notify delivery. Both paths call the same delivery primitive and SQLite
+registry under `$XDG_STATE_HOME/jarri-codex-handoff/delivery.sqlite3`. The
+registry prevents duplicate attempts from reaching the clipboard after a
+successful delivery and makes failed attempts retryable. A process crash in
+the narrow interval after clipboard mutation and before the registry commit
+can still cause another copy after restart; clipboard mutation is not
+transactional with SQLite.
 
 Codex itself remains the upstream Codex executable. Jarri Codex Handoff does
 not replace or modify the Codex program.
@@ -101,12 +126,21 @@ Internal turn-complete notification helper used by `codex-shell`.
 It accepts the Codex notification JSON payload, resolves its exact thread ID
 and completed turn ID in canonical persisted session history, validates the
 payload working directory as a Git repository, and invokes
-`catcopy codex-turn THREAD_ID TURN_ID`. It ignores other event types and
-malformed or unresolved identities.
+the shared delivery primitive for the exact `THREAD_ID` and `TURN_ID`. It
+ignores other event types and malformed or unresolved identities.
 
-The automatic path calls `catcopy` directly rather than relying on the short
-`c` command, so shell aliases or functions named `c` cannot interfere with
-turn-complete handoff.
+### `codex-handoff-watch`
+
+Observes persisted `task_complete` records and recovers turns after a 3-second
+grace period. It polls known rollout files incrementally and periodically
+discovers new files. It uses only Python's standard library. The default
+startup recovery horizon is 10 minutes to prevent historical clipboard
+flooding. Set `JARRI_HANDOFF_GRACE` to change the default grace period, or use
+`--grace`, `--horizon`, `--poll`, and `--retry` for operator control.
+
+The shared delivery path calls `catcopy` directly rather than relying on the
+short `c` command, so shell aliases or functions named `c` cannot interfere
+with turn-complete handoff.
 
 ### `codex-handoff-render`
 
@@ -119,8 +153,8 @@ codex-handoff-render --list
 codex-handoff-render --session-id THREAD_ID --through-turn TURN_ID
 ~~~
 
-The renderer is the owner of Git-repository validation and Codex session
-selection.
+The renderer owns transcript rendering and exact thread/turn resolution.
+The shared delivery primitive validates repository context before invoking it.
 
 ### `catcopy` / `c`
 
@@ -202,19 +236,24 @@ codex-shell
              |
              +--> ~/.codex/sessions/.../rollout-*.jsonl
              |
-             `--> agent-turn-complete
+             +--> persisted task_complete (authoritative completion truth)
+             |          |
+             |          v
+             |   codex-handoff-watch (recovery path)
+             |
+             `--> agent-turn-complete (fast path)
                         |
                         v
                 codex-handoff-notify
                         |
                         v
-                Git repository validation
+             shared durable delivery operation
+                        |
+                        v
+                SQLite delivery registry
                         |
                         v
              catcopy codex-turn THREAD_ID TURN_ID
-                        |
-                        v
-                codex-handoff-render
                         |
                         v
             exact session and turn resolution

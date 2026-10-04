@@ -13,8 +13,9 @@ BINDIR="$(dirname -- "$SCRIPT_PATH")"
 HOOK="$BINDIR/codex-handoff-notify"
 CATCOPY="$BINDIR/catcopy"
 RENDERER="$BINDIR/codex-handoff-render"
+WATCHER="$BINDIR/codex-handoff-watch"
 
-for required in "$HOOK" "$CATCOPY" "$RENDERER"; do
+for required in "$HOOK" "$CATCOPY" "$RENDERER" "$WATCHER"; do
     if [[ ! -x "$required" ]]; then
         echo "codex-shell: required package command is missing: $required" >&2
         exit 127
@@ -162,6 +163,10 @@ Resolve that ownership manually if you want automatic handoff.
 BANNER
         ;;
 esac
+
+# The watcher is independent of Codex's legacy notify callback. It holds a
+# per-user lock, so launching another Codex shell does not create another loop.
+nohup "$WATCHER" >/dev/null 2>&1 </dev/null &
 
 cat <<'BANNER'
 Manual handoff remains available:

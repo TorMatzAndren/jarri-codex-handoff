@@ -10,10 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RENDER = ROOT / "bin" / "codex-handoff-render"
 CATCOPY = ROOT / "bin" / "catcopy"
 NOTIFY = ROOT / "bin" / "codex-handoff-notify"
+DELIVERY = ROOT / "bin" / "handoff_delivery.py"
+WATCH = ROOT / "bin" / "codex-handoff-watch"
 
 
 def record(kind, payload):
-    return json.dumps({"type": kind, "payload": payload}) + "\n"
+    from datetime import datetime, timezone
+    return json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "type": kind, "payload": payload}) + "\n"
 
 
 def make_rollout(home, sid, cwd, turns, name=None):
@@ -127,6 +130,7 @@ class HandoffTests(unittest.TestCase):
         fake_catcopy = fake_bin / "catcopy"
         fake_catcopy.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {called}\n", encoding="utf-8")
         fake_catcopy.chmod(0o755)
+        (fake_bin / "handoff_delivery.py").write_bytes(DELIVERY.read_bytes())
         state = self.base / "state"
         payload = json.dumps({"type": "agent-turn-complete", "cwd": str(self.repo), "thread-id": "thr-exact", "turn-id": "turn-exact", "secret": "do-not-log"})
         result = subprocess.run([str(fake_notify), payload], cwd=self.base, env={**self.env, "XDG_STATE_HOME": str(state)}, text=True, capture_output=True)
@@ -160,6 +164,228 @@ class HandoffTests(unittest.TestCase):
         log = (self.base / "state/jarri-codex-handoff/notify.log").read_text()
         self.assertIn("thread_id=internal-title-thread", log)
         self.assertIn("turn_id=internal-turn", log)
+
+    def make_clip_env(self):
+        bindir = self.base / "clip-bin"
+        bindir.mkdir(exist_ok=True)
+        clipboard = self.base / "clipboard"
+        backend = bindir / "wl-copy"
+        backend.write_text(f"#!/bin/sh\ncat > {clipboard}\nprintf 'x' >> {self.base / 'copies'}\n", encoding="utf-8")
+        backend.chmod(0o755)
+        return {**self.env, "PATH": f"{bindir}:{os.environ['PATH']}", "WAYLAND_DISPLAY": "test", "XDG_STATE_HOME": str(self.base / "state")}, clipboard
+
+    def invoke_deliver(self, sid, turn, source="notify", repo=None, env=None):
+        return subprocess.run(["python3", str(DELIVERY), "deliver", sid, turn, str(repo or self.repo), source], env=env or self.env, text=True, capture_output=True)
+
+    def test_notify_delivery_records_success_and_is_idempotent(self):
+        make_rollout(self.home, "once", self.repo, [("t1", "one")])
+        env, clipboard = self.make_clip_env()
+        first = self.invoke_deliver("once", "t1", env=env)
+        second = self.invoke_deliver("once", "t1", "recovery", env=env)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.base / "copies").read_text(), "x")
+        import sqlite3
+        row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT status,delivery_source FROM deliveries WHERE thread_id='once' AND turn_id='t1'").fetchone()
+        self.assertEqual(row, ("delivered", "notify"))
+
+    def test_observer_once_recovers_missed_notify(self):
+        make_rollout(self.home, "recover", self.repo, [("t1", "recovered")])
+        env, clipboard = self.make_clip_env()
+        result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final recovered", clipboard.read_text())
+        import sqlite3
+        row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT delivery_source,status FROM deliveries WHERE thread_id='recover' AND turn_id='t1'").fetchone()
+        self.assertEqual(row, ("recovery", "delivered"))
+
+    def test_notify_and_recovery_race_mutates_clipboard_once(self):
+        make_rollout(self.home, "race", self.repo, [("t1", "race")])
+        env, _ = self.make_clip_env()
+        commands = [["python3", str(DELIVERY), "deliver", "race", "t1", str(self.repo), source] for source in ("notify", "recovery")]
+        procs = [subprocess.Popen(c, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for c in commands]
+        self.assertEqual([p.wait() for p in procs], [0, 0])
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
+    def test_failed_delivery_is_retryable(self):
+        make_rollout(self.home, "retry", self.repo, [("t1", "retry")])
+        env = {**self.env, "XDG_STATE_HOME": str(self.base / "state")}
+        failed = self.invoke_deliver("retry", "t1", env=env)
+        self.assertEqual(failed.returncode, 1)
+        env, _ = self.make_clip_env()
+        retried = self.invoke_deliver("retry", "t1", "recovery", env=env)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+
+    def test_observer_does_not_recopy_after_restart(self):
+        make_rollout(self.home, "restart-delivered", self.repo, [("t1", "one")])
+        env, _ = self.make_clip_env()
+        self.assertEqual(self.invoke_deliver("restart-delivered", "t1", env=env).returncode, 0)
+        subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, check=True, capture_output=True)
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
+    def test_old_historical_completions_are_outside_startup_horizon(self):
+        path = make_rollout(self.home, "historical", self.repo, [("old", "OLD")])
+        rows = path.read_text().replace('"timestamp": "', '"timestamp": "2000-01-01T00:00:00+00:00", "ignored": "')
+        path.write_text(rows)
+        os.utime(path, None)
+        env, _ = self.make_clip_env()
+        subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, check=True, capture_output=True)
+        self.assertFalse((self.base / "copies").exists())
+
+    def test_incremental_second_turn_and_partial_line(self):
+        path = make_rollout(self.home, "incremental", self.repo, [("first", "first")])
+        env, clipboard = self.make_clip_env()
+        # Watch one processes both complete events without requiring any external service.
+        with path.open("a") as f:
+            f.write(record("response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "final second"}]}))
+            f.write(record("event_msg", {"type": "task_complete", "turn_id": "second"}))
+        subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, check=True, capture_output=True)
+        self.assertIn("final second", clipboard.read_text())
+
+    def test_internal_and_mismatched_repo_are_ignored_by_observer(self):
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        subprocess.run(["git", "init", "-q", str(foreign)], check=True)
+        make_rollout(self.home, "foreign-session", foreign, [("foreign-turn", "FOREIGN")])
+        env, _ = self.make_clip_env()
+        subprocess.run([str(WATCH), "--once", "--repo", str(self.repo), "--grace", "0"], env=env, check=True, capture_output=True)
+        self.assertFalse((self.base / "copies").exists())
+
+    def test_manual_catcopy_modes_stay_available(self):
+        make_rollout(self.home, "manual-a", self.repo, [("t1", "one")], "a")
+        make_rollout(self.home, "manual-b", self.repo, [("t2", "two")], "b")
+        env, clipboard = self.make_clip_env()
+        (self.base / "clip-bin" / "c").symlink_to(CATCOPY)
+        for args in (["thisrepo"], ["thisrepo", "1"], ["thisrepo", "list"]):
+            result = subprocess.run(["c", *args], cwd=self.repo, env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(clipboard.exists())
+
+    def test_exact_turn_delivery_excludes_later_turn(self):
+        make_rollout(self.home, "bounded", self.repo, [("A", "Turn A"), ("B", "Turn B")])
+        env, clipboard = self.make_clip_env()
+        result = self.invoke_deliver("bounded", "A", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = clipboard.read_text()
+        self.assertIn("final Turn A", text)
+        self.assertNotIn("Turn B", text)
+
+    def test_observer_once_discovers_new_rollout_file(self):
+        make_rollout(self.home, "new-rollout", self.repo, [("newturn", "NEW_ROLLOUT")])
+        env, clipboard = self.make_clip_env()
+        result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final NEW_ROLLOUT", clipboard.read_text())
+
+    def test_partial_jsonl_tail_waits_for_completion(self):
+        path = make_rollout(self.home, "partial", self.repo, [])
+        partial = json.dumps({"timestamp": "2026-10-04T00:00:00+00:00", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "partial-turn"}})
+        with path.open("a") as f:
+            f.write(partial[:30])
+        from importlib.util import spec_from_file_location, module_from_spec
+        spec = spec_from_file_location("handoff_delivery", DELIVERY)
+        module = module_from_spec(spec); spec.loader.exec_module(module)
+        self.assertFalse(any(turn == "partial-turn" for turn, _ in module.complete_rows(path)))
+        with path.open("a") as f:
+            f.write(partial[30:] + "\n")
+        rows = list(module.complete_rows(path))
+        self.assertEqual(rows[-1][0], "partial-turn")
+
+    def test_recent_failed_attempt_is_recovered_after_restart(self):
+        make_rollout(self.home, "restart-pending", self.repo, [("t1", "recover-after-restart")])
+        failed_env = {**self.env, "XDG_STATE_HOME": str(self.base / "state")}
+        self.assertEqual(self.invoke_deliver("restart-pending", "t1", env=failed_env).returncode, 1)
+        env, clipboard = self.make_clip_env()
+        result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final recover-after-restart", clipboard.read_text())
+
+    def test_healthy_notify_during_grace_does_not_duplicate(self):
+        make_rollout(self.home, "healthy", self.repo, [("t1", "healthy")])
+        env, _ = self.make_clip_env()
+        watcher = subprocess.Popen([str(WATCH), "--poll", "0.02", "--retry", "0.1", "--grace", "0.3"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            import time
+            time.sleep(0.08)
+            notified = self.invoke_deliver("healthy", "t1", "notify", env=env)
+            self.assertEqual(notified.returncode, 0, notified.stderr)
+            time.sleep(0.45)
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=3)
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
+    def test_running_observer_discovers_appended_completion(self):
+        path = make_rollout(self.home, "append-live", self.repo, [])
+        env, _ = self.make_clip_env()
+        watcher = subprocess.Popen([str(WATCH), "--poll", "0.02", "--retry", "0.1", "--grace", "0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            import time
+            time.sleep(0.1)
+            with path.open("a") as stream:
+                stream.write(record("response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "final incremental"}]}))
+                stream.write(record("event_msg", {"type": "task_complete", "turn_id": "incremental-turn"}))
+            deadline = time.monotonic() + 3
+            while not (self.base / "copies").exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=3)
+        self.assertTrue((self.base / "copies").exists())
+        self.assertIn("final incremental", (self.base / "clipboard").read_text())
+
+    def test_live_recovery_failure_retries(self):
+        path = make_rollout(self.home, "retry-watch", self.repo, [])
+        env, _ = self.make_clip_env()
+        backend = Path(env["PATH"].split(":", 1)[0]) / "wl-copy"
+        backend.write_text("#!/bin/sh\nexit 7\n")
+        backend.chmod(0o755)
+        watcher = subprocess.Popen([str(WATCH), "--poll", "0.02", "--retry", "0.15", "--grace", "0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            import time
+            time.sleep(0.1)
+            with path.open("a") as stream:
+                stream.write(record("response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "final retry"}]}))
+                stream.write(record("event_msg", {"type": "task_complete", "turn_id": "retry-turn"}))
+            time.sleep(0.25)
+            backend.write_text(f"#!/bin/sh\ncat > {self.base / 'clipboard'}\nprintf x >> {self.base / 'copies'}\n")
+            backend.chmod(0o755)
+            deadline = time.monotonic() + 3
+            while not (self.base / "copies").exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=3)
+        self.assertTrue((self.base / "copies").exists())
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
+    def test_rollout_truncation_resets_incremental_offset(self):
+        path = make_rollout(self.home, "replace", self.repo, [("before", "BEFORE")])
+        env, clipboard = self.make_clip_env()
+        subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, check=True, capture_output=True)
+        path.write_text("".join([record("session_meta", {"id": "replace", "cwd": str(self.repo)}),
+                                  record("response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "final after"}]}),
+                                  record("event_msg", {"type": "task_complete", "turn_id": "after"})]))
+        # A fresh one-shot pass safely sees the replacement; prior identity stays delivered.
+        subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, check=True, capture_output=True)
+        self.assertIn("final after", clipboard.read_text())
+
+    def test_registry_is_safe_across_processes(self):
+        make_rollout(self.home, "concurrent", self.repo, [("t1", "ONE")])
+        env, _ = self.make_clip_env()
+        commands = [["python3", str(DELIVERY), "deliver", "concurrent", "t1", str(self.repo), s] for s in ("notify", "recovery")]
+        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for cmd in commands]
+        self.assertEqual(sorted(p.wait() for p in procs), [0, 0])
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
+    def test_delivery_logs_do_not_include_transcript_content(self):
+        make_rollout(self.home, "secret-session", self.repo, [("secret-turn", "TRANSCRIPT_SECRET")])
+        env, _ = self.make_clip_env()
+        self.invoke_deliver("secret-session", "secret-turn", env=env)
+        log = (self.base / "state/jarri-codex-handoff/handoff.log").read_text()
+        self.assertIn("thread_id=secret-session", log)
+        self.assertIn("turn_id=secret-turn", log)
+        self.assertNotIn("TRANSCRIPT_SECRET", log)
 
 
 if __name__ == "__main__":

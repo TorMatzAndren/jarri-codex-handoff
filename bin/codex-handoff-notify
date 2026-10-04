@@ -30,9 +30,10 @@ fi
 SCRIPT_PATH="$(readlink -f -- "$0")"
 BINDIR="$(dirname -- "$SCRIPT_PATH")"
 CATCOPY="$BINDIR/catcopy"
+DELIVERY="$BINDIR/handoff_delivery.py"
 
-if [[ ! -x "$CATCOPY" ]]; then
-    echo "codex-handoff-notify: catcopy not found beside notify helper." >&2
+if [[ ! -x "$CATCOPY" || ! -f "$DELIVERY" ]]; then
+    echo "codex-handoff-notify: delivery helper or catcopy not found beside notify helper." >&2
     exit 127
 fi
 
@@ -60,7 +61,7 @@ PAYLOAD_PY
 )"
 
 log_record() {
-    printf '%s pid=%s process_cwd=%q payload_cwd=%q thread_id=%q turn_id=%q %s\n' \
+    printf '%s pid=%s source=notify process_cwd=%q payload_cwd=%q thread_id=%q turn_id=%q %s\n' \
         "$(date --iso-8601=ns)" "$$" "${PWD:-}" "$CWD" \
         "$THREAD_ID" "$TURN_ID" "$1" >>"$LOG_FILE" 2>/dev/null || true
 }
@@ -94,11 +95,11 @@ fi
 
 cd "$CWD" || exit 0
 
-log_record "event=handoff-start status=running"
+log_record "event=notify-delivery-request status=running"
 
-"$CATCOPY" codex-turn "$THREAD_ID" "$TURN_ID"
+python3 "$DELIVERY" deliver "$THREAD_ID" "$TURN_ID" "$CWD" notify
 STATUS=$?
 
-log_record "event=handoff-finish status=$STATUS"
+log_record "event=notify-delivery-finish status=$STATUS"
 
 exit "$STATUS"
