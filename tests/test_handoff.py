@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +107,41 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("new", listing.stdout)
         self.assertIn("old", listing.stdout)
 
+
+    def test_catcopy_does_not_wait_for_clipboard_owner_inherited_pipes(self):
+        make_rollout(self.home, "thread", self.repo, [("turn-a", "A")])
+        env, clipboard = self.make_clip_env()
+        bindir = Path(env["PATH"].split(":", 1)[0])
+        backend = bindir / "wl-copy"
+
+        backend.write_text(
+            "#!/bin/sh\n"
+            f"cat > {clipboard}\n"
+            # Simulate an X11-style detached clipboard owner that remains alive
+            # after accepting stdin. If it inherits catcopy's stdout/stderr,
+            # capture_output=True in the parent will wait for pipe EOF.
+            "(sleep 5) &\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        backend.chmod(0o755)
+
+        started = time.monotonic()
+        result = subprocess.run(
+            [str(CATCOPY), "codex-turn", "thread", "turn-a"],
+            cwd=self.repo,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=1.0,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(clipboard.exists())
+        self.assertIn("final A", clipboard.read_text())
+
     def test_catcopy_exact_path_uses_stub_clipboard(self):
         make_rollout(self.home, "thread", self.repo, [("turn-a", "A"), ("turn-b", "B")])
         bin_dir = self.base / "bin"
@@ -174,6 +210,24 @@ class HandoffTests(unittest.TestCase):
         backend.chmod(0o755)
         return {**self.env, "PATH": f"{bindir}:{os.environ['PATH']}", "WAYLAND_DISPLAY": "test", "XDG_STATE_HOME": str(self.base / "state")}, clipboard
 
+    def make_failed_clip_env(self):
+        bindir = self.base / "failed-clip-bin"
+        bindir.mkdir(exist_ok=True)
+        backend = bindir / "wl-copy"
+        backend.write_text(
+            "#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "exit 7\n",
+            encoding="utf-8",
+        )
+        backend.chmod(0o755)
+        return {
+            **self.env,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "WAYLAND_DISPLAY": "test",
+            "XDG_STATE_HOME": str(self.base / "state"),
+        }
+
     def invoke_deliver(self, sid, turn, source="notify", repo=None, env=None):
         return subprocess.run(["python3", str(DELIVERY), "deliver", sid, turn, str(repo or self.repo), source], env=env or self.env, text=True, capture_output=True)
 
@@ -209,7 +263,7 @@ class HandoffTests(unittest.TestCase):
 
     def test_failed_delivery_is_retryable(self):
         make_rollout(self.home, "retry", self.repo, [("t1", "retry")])
-        env = {**self.env, "XDG_STATE_HOME": str(self.base / "state")}
+        env = self.make_failed_clip_env()
         failed = self.invoke_deliver("retry", "t1", env=env)
         self.assertEqual(failed.returncode, 1)
         env, _ = self.make_clip_env()
@@ -293,7 +347,7 @@ class HandoffTests(unittest.TestCase):
 
     def test_recent_failed_attempt_is_recovered_after_restart(self):
         make_rollout(self.home, "restart-pending", self.repo, [("t1", "recover-after-restart")])
-        failed_env = {**self.env, "XDG_STATE_HOME": str(self.base / "state")}
+        failed_env = self.make_failed_clip_env()
         self.assertEqual(self.invoke_deliver("restart-pending", "t1", env=failed_env).returncode, 1)
         env, clipboard = self.make_clip_env()
         result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
