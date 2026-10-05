@@ -1,0 +1,166 @@
+Title: Codex Clipboard Handoff Repeat Storm
+ID: incident-2026-10-05-clipboard-handoff-repeat-storm
+Date: 2026-10-05
+Author: Matz
+Type: incident
+Subsystem: codex-handoff
+Updated: 2026-10-05
+Revision: 1
+
+---
+
+@role:incident
+
+@subsystem:codex-handoff
+@subsystem:clipboard
+@subsystem:workspace
+
+@scope:automatic-handoff
+@scope:clipboard-delivery
+@scope:recovery-watcher
+@scope:retry-semantics
+@scope:x11-selection-ownership
+
+@entity:/home/dretski/projects/jarri-codex-handoff/bin/catcopy
+@entity:/home/dretski/projects/jarri-codex-handoff/bin/handoff_delivery.py
+@entity:/var/jarri/clipboard-register/clipboard_register.sqlite3
+@entity:commit:3735253
+
+@truth:verified
+@evidence:runtime
+@evidence:sqlite
+@evidence:test-suite
+
+# Summary
+
+On 2026-10-05 the Jarri Codex Handoff recovery watcher repeatedly
+delivered one completed Codex turn to the clipboard.
+
+The affected delivery reached 1,245 attempts.
+
+Clipboard Register correctly recorded each clipboard mutation, producing
+a large sequence of identical CODEX observations. Clipboard History was
+therefore displaying evidence of a real repeated side effect rather than
+duplicating rows at presentation time.
+
+# Affected Turn
+
+Thread:
+
+    01a109f5-646c-74f0-afa1-d7c7d5c29043
+
+Turn:
+
+    01a109f5-6ce8-7d81-a0ba-47022768dfc9
+
+Clipboard content SHA-256:
+
+    9f00751dde18d2c1c3705bb387d58c857c96682af6be79735ae27b34e091482d
+
+Original Clipboard Register observation preserved:
+
+    #15476
+
+Redundant observations removed:
+
+    1246
+
+The Clipboard Register cleanup count is not identical to the delivery-attempt
+count. Cleanup was performed by content hash and therefore also includes any
+matching clipboard mutations produced during investigation and reproduction.
+
+# Failure Mechanism
+
+handoff_delivery.py invoked:
+
+    catcopy codex-turn THREAD_ID TURN_ID
+
+using Python subprocess capture_output=True and a 30 second timeout.
+
+catcopy rendered the canonical Codex session correctly and invoked xclip.
+
+On X11, xclip accepted the clipboard payload and forked a long-lived
+selection-owner process.
+
+That detached process inherited catcopy's stdout/stderr descriptors.
+Because handoff_delivery.py was capturing those descriptors, Python did
+not observe EOF even after the foreground catcopy/xclip path had completed.
+
+The clipboard mutation had already succeeded, but the caller eventually
+timed out after 30 seconds and recorded the delivery as failed.
+
+The recovery watcher then retried the same side effect.
+
+Observed cycle:
+
+    recovery_delivery_claimed
+        -> clipboard mutation succeeds
+        -> captured pipe remains open
+        -> 30 second timeout
+        -> delivery_failure
+        -> retry
+
+The cycle repeated approximately every 31 seconds.
+
+# Investigation Evidence
+
+Direct timing of the affected canonical turn showed:
+
+    codex-handoff-render: approximately 0.061 s
+    xclip write:          approximately 0.005 s
+    catcopy direct:       approximately 0.085 s
+
+The failure reproduced specifically when catcopy was executed beneath a
+caller using capture_output=True.
+
+Clipboard Register observations were approximately 189 KB each and shared
+the same content hash.
+
+The delivery database eventually recorded:
+
+    status: delivered
+    attempts: 1245
+    delivery_source: recovery
+
+# Fix
+
+catcopy now launches clipboard providers with:
+
+    stdout=subprocess.DEVNULL
+    stderr=subprocess.DEVNULL
+
+The long-lived X11 clipboard selection owner can therefore no longer retain
+the captured output pipes of handoff_delivery.py.
+
+Commit:
+
+    3735253 Prevent clipboard owner pipe inheritance
+
+# Verification
+
+A direct reproduction of the formerly failing captured subprocess path
+returned successfully in approximately 0.081 seconds.
+
+A regression test was added which models a clipboard provider that accepts
+stdin, forks a long-lived descendant, and exits.
+
+The complete Jarri Codex Handoff test suite passed:
+
+    28 tests
+    28 passed
+
+git diff --check also passed before commit.
+
+# Cleanup
+
+Only redundant Clipboard Register observation rows for the affected content
+hash were removed.
+
+The earliest observation was retained as the historical original.
+
+The shared content object was deliberately retained because the surviving
+observation still references it.
+
+A consistent pre-cleanup SQLite backup was written to:
+
+    /tmp/clipboard_register-before-codex-repeat-cleanup-20261005.sqlite3
