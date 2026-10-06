@@ -29,11 +29,11 @@ fi
 
 SCRIPT_PATH="$(readlink -f -- "$0")"
 BINDIR="$(dirname -- "$SCRIPT_PATH")"
-CATCOPY="$BINDIR/catcopy"
+COPY="$BINDIR/codex-handoff-copy"
 DELIVERY="$BINDIR/handoff_delivery.py"
 
-if [[ ! -x "$CATCOPY" || ! -f "$DELIVERY" ]]; then
-    echo "codex-handoff-notify: delivery helper or catcopy not found beside notify helper." >&2
+if [[ ! -x "$COPY" || ! -f "$DELIVERY" ]]; then
+    echo "codex-handoff-notify: delivery helper or copy command not found beside notify helper." >&2
     exit 127
 fi
 

@@ -21,7 +21,7 @@ Revision: 1
 @scope:retry-semantics
 @scope:x11-selection-ownership
 
-@entity:/home/dretski/projects/jarri-codex-handoff/bin/catcopy
+@entity:/home/dretski/projects/jarri-codex-handoff/bin/codex-handoff-copy
 @entity:/home/dretski/projects/jarri-codex-handoff/bin/handoff_delivery.py
 @entity:/var/jarri/clipboard-register/clipboard_register.sqlite3
 @entity:commit:3735253
@@ -73,7 +73,7 @@ matching clipboard mutations produced during investigation and reproduction.
 
 handoff_delivery.py invoked:
 
-    catcopy codex-turn THREAD_ID TURN_ID
+    codex-handoff-copy --thread THREAD_ID --turn TURN_ID
 
 using Python subprocess capture_output=True and a 30 second timeout.
 

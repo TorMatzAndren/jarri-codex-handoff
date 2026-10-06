@@ -98,18 +98,18 @@ def deliver(thread, turn, repo, source):
         valid = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True).stdout.strip()
         if not valid:
             raise RuntimeError("unresolved repository")
-        result = subprocess.run([str(BASE / "catcopy"), "codex-turn", thread, turn], cwd=valid, timeout=30, capture_output=True, text=True)
+        result = subprocess.run([str(BASE / "codex-handoff-copy"), "--thread", thread, "--turn", turn], cwd=valid, timeout=30, capture_output=True, text=True)
         if result.stdout:
             sys.stdout.write(result.stdout)
         if result.returncode:
             if result.stderr:
                 sys.stderr.write(result.stderr)
-            message = result.stderr or f"catcopy exit {result.returncode}"
+            message = result.stderr or f"codex-handoff-copy exit {result.returncode}"
             if "No canonical Codex session" in message:
                 log("unresolved_session", thread, turn, source)
             elif "not found in session" in message:
                 log("unresolved_turn", thread, turn, source)
-            raise RuntimeError(f"catcopy exit {result.returncode}")
+            raise RuntimeError(f"codex-handoff-copy exit {result.returncode}")
         status, error = "delivered", None
     except Exception as exc:
         status, error = "failed", str(exc)[:240]

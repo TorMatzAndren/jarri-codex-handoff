@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RENDER = ROOT / "bin" / "codex-handoff-render"
-CATCOPY = ROOT / "bin" / "catcopy"
+COPY = ROOT / "bin" / "codex-handoff-copy"
 NOTIFY = ROOT / "bin" / "codex-handoff-notify"
 DELIVERY = ROOT / "bin" / "handoff_delivery.py"
 WATCH = ROOT / "bin" / "codex-handoff-watch"
@@ -108,7 +108,7 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("old", listing.stdout)
 
 
-    def test_catcopy_does_not_wait_for_clipboard_owner_inherited_pipes(self):
+    def test_copy_does_not_wait_for_clipboard_owner_inherited_pipes(self):
         make_rollout(self.home, "thread", self.repo, [("turn-a", "A")])
         env, clipboard = self.make_clip_env()
         bindir = Path(env["PATH"].split(":", 1)[0])
@@ -128,7 +128,7 @@ class HandoffTests(unittest.TestCase):
 
         started = time.monotonic()
         result = subprocess.run(
-            [str(CATCOPY), "codex-turn", "thread", "turn-a"],
+            [str(COPY), "--thread", "thread", "--turn", "turn-a"],
             cwd=self.repo,
             env=env,
             text=True,
@@ -142,17 +142,18 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(clipboard.exists())
         self.assertIn("final A", clipboard.read_text())
 
-    def test_catcopy_exact_path_uses_stub_clipboard(self):
+    def test_copy_exact_path_uses_external_catcopy(self):
         make_rollout(self.home, "thread", self.repo, [("turn-a", "A"), ("turn-b", "B")])
         bin_dir = self.base / "bin"
         bin_dir.mkdir()
         clip = self.base / "clipboard"
-        backend = bin_dir / "wl-copy"
-        backend.write_text(f"#!/bin/sh\ncat > {clip}\n", encoding="utf-8")
-        backend.chmod(0o755)
-        result = subprocess.run([str(CATCOPY), "codex-turn", "thread", "turn-a"], cwd=self.repo, env={**self.env, "PATH": f"{bin_dir}:{os.environ['PATH']}", "WAYLAND_DISPLAY": "test"}, text=True, capture_output=True)
+        external = bin_dir / "catcopy"
+        external.write_text(f"#!/bin/sh\ncat > {clip}\n", encoding="utf-8")
+        external.chmod(0o755)
+        result = subprocess.run([str(COPY), "--thread", "thread", "--turn", "turn-a"], cwd=self.repo, env={**self.env, "PATH": f"{bin_dir}:{os.environ['PATH']}"}, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         copied = clip.read_text(encoding="utf-8")
+        self.assertIn("PATH: CODEX:thread:thread:turn:turn-a", copied)
         self.assertIn("final A", copied)
         self.assertNotIn("user B", copied)
 
@@ -163,26 +164,26 @@ class HandoffTests(unittest.TestCase):
         fake_notify = fake_bin / "codex-handoff-notify"
         fake_notify.write_bytes(NOTIFY.read_bytes())
         fake_notify.chmod(0o755)
-        fake_catcopy = fake_bin / "catcopy"
-        fake_catcopy.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {called}\n", encoding="utf-8")
-        fake_catcopy.chmod(0o755)
+        fake_copy = fake_bin / "codex-handoff-copy"
+        fake_copy.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" > {called}\n", encoding="utf-8")
+        fake_copy.chmod(0o755)
         (fake_bin / "handoff_delivery.py").write_bytes(DELIVERY.read_bytes())
         state = self.base / "state"
         payload = json.dumps({"type": "agent-turn-complete", "cwd": str(self.repo), "thread-id": "thr-exact", "turn-id": "turn-exact", "secret": "do-not-log"})
         result = subprocess.run([str(fake_notify), payload], cwd=self.base, env={**self.env, "XDG_STATE_HOME": str(state)}, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(called.read_text().strip(), "codex-turn thr-exact turn-exact")
+        self.assertEqual(called.read_text().strip(), "--thread thr-exact --turn turn-exact")
         log = (state / "jarri-codex-handoff" / "notify.log").read_text()
         self.assertIn("thread_id=thr-exact", log)
         self.assertIn("turn_id=turn-exact", log)
         self.assertNotIn("do-not-log", log)
         malformed = subprocess.run([str(fake_notify), "not-json"], cwd=self.base, env={**self.env, "XDG_STATE_HOME": str(state)}, text=True, capture_output=True)
         self.assertEqual(malformed.returncode, 0)
-        self.assertEqual(called.read_text().strip(), "codex-turn thr-exact turn-exact")
+        self.assertEqual(called.read_text().strip(), "--thread thr-exact --turn turn-exact")
         non_event = json.dumps({"type": "file-change", "cwd": str(self.repo), "thread-id": "thr-other", "turn-id": "turn-other"})
         ignored = subprocess.run([str(fake_notify), non_event], cwd=self.base, env={**self.env, "XDG_STATE_HOME": str(state)}, text=True, capture_output=True)
         self.assertEqual(ignored.returncode, 0)
-        self.assertEqual(called.read_text().strip(), "codex-turn thr-exact turn-exact")
+        self.assertEqual(called.read_text().strip(), "--thread thr-exact --turn turn-exact")
         self.assertIn("reason=non_agent_turn_complete", (state / "jarri-codex-handoff" / "notify.log").read_text())
 
     def test_internal_noncanonical_thread_cannot_copy_unrelated_rollout(self):
@@ -205,26 +206,25 @@ class HandoffTests(unittest.TestCase):
         bindir = self.base / "clip-bin"
         bindir.mkdir(exist_ok=True)
         clipboard = self.base / "clipboard"
-        backend = bindir / "wl-copy"
-        backend.write_text(f"#!/bin/sh\ncat > {clipboard}\nprintf 'x' >> {self.base / 'copies'}\n", encoding="utf-8")
-        backend.chmod(0o755)
-        return {**self.env, "PATH": f"{bindir}:{os.environ['PATH']}", "WAYLAND_DISPLAY": "test", "XDG_STATE_HOME": str(self.base / "state")}, clipboard
+        catcopy = bindir / "catcopy"
+        catcopy.write_text(f"#!/bin/sh\ncat > {clipboard}\nprintf 'x' >> {self.base / 'copies'}\n", encoding="utf-8")
+        catcopy.chmod(0o755)
+        return {**self.env, "PATH": f"{bindir}:{os.environ['PATH']}", "XDG_STATE_HOME": str(self.base / "state")}, clipboard
 
     def make_failed_clip_env(self):
         bindir = self.base / "failed-clip-bin"
         bindir.mkdir(exist_ok=True)
-        backend = bindir / "wl-copy"
-        backend.write_text(
+        catcopy = bindir / "catcopy"
+        catcopy.write_text(
             "#!/bin/sh\n"
             "cat >/dev/null\n"
             "exit 7\n",
             encoding="utf-8",
         )
-        backend.chmod(0o755)
+        catcopy.chmod(0o755)
         return {
             **self.env,
             "PATH": f"{bindir}:{os.environ['PATH']}",
-            "WAYLAND_DISPLAY": "test",
             "XDG_STATE_HOME": str(self.base / "state"),
         }
 
@@ -305,15 +305,50 @@ class HandoffTests(unittest.TestCase):
         subprocess.run([str(WATCH), "--once", "--repo", str(self.repo), "--grace", "0"], env=env, check=True, capture_output=True)
         self.assertFalse((self.base / "copies").exists())
 
-    def test_manual_catcopy_modes_stay_available(self):
+    def test_manual_copy_modes_stay_available(self):
         make_rollout(self.home, "manual-a", self.repo, [("t1", "one")], "a")
-        make_rollout(self.home, "manual-b", self.repo, [("t2", "two")], "b")
+        newest = make_rollout(self.home, "manual-b", self.repo, [("t2", "two")], "b")
+        os.utime(newest, (2_000_000_000, 2_000_000_000))
         env, clipboard = self.make_clip_env()
-        (self.base / "clip-bin" / "c").symlink_to(CATCOPY)
-        for args in (["thisrepo"], ["thisrepo", "1"], ["thisrepo", "list"]):
-            result = subprocess.run(["c", *args], cwd=self.repo, env=env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(clipboard.exists())
+        newest_result = subprocess.run([str(COPY)], cwd=self.repo, env=env, text=True, capture_output=True)
+        self.assertEqual(newest_result.returncode, 0, newest_result.stderr)
+        self.assertIn("final two", clipboard.read_text())
+        historical = subprocess.run([str(COPY), "1"], cwd=self.repo, env=env, text=True, capture_output=True)
+        self.assertEqual(historical.returncode, 0, historical.stderr)
+        self.assertIn("final one", clipboard.read_text())
+        before_list = clipboard.read_text()
+        listing = subprocess.run([str(COPY), "--list"], cwd=self.repo, env=env, text=True, capture_output=True)
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn("manual-a", listing.stdout)
+        self.assertIn("manual-b", listing.stdout)
+        self.assertEqual(clipboard.read_text(), before_list)
+
+    def test_copy_strictly_requires_git_repository(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        result = subprocess.run([str(COPY), "--list"], cwd=outside, env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git repository", result.stderr)
+
+    def test_install_and_uninstall_preserve_external_command_ownership(self):
+        prefix = self.base / "prefix"
+        bindir = prefix / "bin"
+        bindir.mkdir(parents=True)
+        c = bindir / "c"
+        catcopy = bindir / "catcopy"
+        c.write_text("external c", encoding="utf-8")
+        catcopy.write_text("external catcopy", encoding="utf-8")
+        env = {**self.env, "PREFIX": str(prefix)}
+        installed = subprocess.run([str(ROOT / "install.sh")], cwd=ROOT, env=env, text=True, capture_output=True)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(c.read_text(), "external c")
+        self.assertEqual(catcopy.read_text(), "external catcopy")
+        self.assertTrue((bindir / "codex-handoff-copy").is_file())
+        removed = subprocess.run([str(ROOT / "uninstall.sh")], cwd=ROOT, env=env, text=True, capture_output=True)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(c.read_text(), "external c")
+        self.assertEqual(catcopy.read_text(), "external catcopy")
+        self.assertFalse((bindir / "codex-handoff-copy").exists())
 
     def test_exact_turn_delivery_excludes_later_turn(self):
         make_rollout(self.home, "bounded", self.repo, [("A", "Turn A"), ("B", "Turn B")])

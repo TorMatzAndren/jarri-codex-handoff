@@ -24,9 +24,10 @@ exiting Codex.
 Manual and historical handoff controls remain available:
 
 ~~~bash
-c thisrepo        # newest Codex session for this repository
-c thisrepo 1      # previous session
-c thisrepo list   # list matching sessions
+codex-handoff-copy                 # newest Codex session for this repository
+codex-handoff-copy 1               # previous session
+codex-handoff-copy --list          # list matching sessions
+codex-handoff-copy --thread ID --turn ID  # exact completed turn
 ~~~
 
 ## What it does
@@ -49,9 +50,9 @@ It:
 - preserves tool calls and tool outputs
 - excludes reasoning records
 - supports automatic exact-turn handoff after each completed Codex turn
-- keeps manual and historical session selection available through `c thisrepo`
+- keeps manual and historical session selection available through `codex-handoff-copy`
 
-`thisrepo` is intentionally strict. It must be run from inside a Git
+Repo-local copy and listing are intentionally strict. They must be run from inside a Git
 repository. Non-Git directories such as `/`, `$HOME`, or `/tmp` are not
 treated as implicit repository roots.
 
@@ -138,9 +139,8 @@ startup recovery horizon is 10 minutes to prevent historical clipboard
 flooding. Set `JARRI_HANDOFF_GRACE` to change the default grace period, or use
 `--grace`, `--horizon`, `--poll`, and `--retry` for operator control.
 
-The shared delivery path calls `catcopy` directly rather than relying on the
-short `c` command, so shell aliases or functions named `c` cannot interfere
-with turn-complete handoff.
+The shared delivery path invokes `codex-handoff-copy` directly, so shell aliases
+or functions cannot interfere with turn-complete handoff.
 
 ### `codex-handoff-render`
 
@@ -156,28 +156,20 @@ codex-handoff-render --session-id THREAD_ID --through-turn TURN_ID
 The renderer owns transcript rendering and exact thread/turn resolution.
 The shared delivery primitive validates repository context before invoking it.
 
-### `catcopy` / `c`
+### `codex-handoff-copy`
 
-`c` is a thin symlink to `catcopy`.
-
-Normal clipboard use:
+This command renders and copies Codex transcripts:
 
 ~~~bash
-c file.txt
-cat file.txt | c
+codex-handoff-copy
+codex-handoff-copy 1
+codex-handoff-copy --list
+codex-handoff-copy --thread THREAD_ID --turn TURN_ID
 ~~~
 
-Codex handoff:
-
-~~~bash
-c thisrepo
-c thisrepo 1
-c thisrepo list
-catcopy codex-turn THREAD_ID TURN_ID
-~~~
-
-`catcopy` prefers the `codex-handoff-render` executable installed beside it,
-then falls back to normal `PATH` resolution.
+Clipboard delivery uses external `catcopy` on `PATH`. `catcopy` is a required
+external dependency for copying; this repository does not install or manage it.
+The standalone catcopy project owns the commands `c` and `catcopy`.
 
 ## Installation
 
@@ -217,9 +209,7 @@ Required:
 
 Clipboard backend:
 
-- `xclip`
-- `xsel`
-- `wl-copy`
+- external standalone `catcopy` command (which selects its clipboard backend)
 
 Codex itself is not bundled.
 
@@ -253,7 +243,7 @@ codex-shell
                 SQLite delivery registry
                         |
                         v
-             catcopy codex-turn THREAD_ID TURN_ID
+             codex-handoff-copy --thread THREAD_ID --turn TURN_ID
                         |
                         v
             exact session and turn resolution
@@ -272,7 +262,7 @@ codex-handoff-render
     |
     `--> stdout
 
-c thisrepo
+codex-handoff-copy
     |
     `--> clipboard
 ~~~
@@ -313,7 +303,7 @@ Verification covered:
 - real `agent-turn-complete` notification delivery
 - automatic clipboard update while Codex remains open
 - complete current-turn data being present in persisted JSONL when notify fires
-- strict failure of `c thisrepo` outside a Git repository
+- strict failure of `codex-handoff-copy` outside a Git repository
 - clean Codex configuration
 - idempotent repeated `codex-shell` configuration
 - preservation of an existing foreign `notify` setting

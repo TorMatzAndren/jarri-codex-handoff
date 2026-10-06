@@ -11,11 +11,11 @@ SCRIPT_PATH="$(readlink -f -- "$0")"
 BINDIR="$(dirname -- "$SCRIPT_PATH")"
 
 HOOK="$BINDIR/codex-handoff-notify"
-CATCOPY="$BINDIR/catcopy"
+COPY="$BINDIR/codex-handoff-copy"
 RENDERER="$BINDIR/codex-handoff-render"
 WATCHER="$BINDIR/codex-handoff-watch"
 
-for required in "$HOOK" "$CATCOPY" "$RENDERER" "$WATCHER"; do
+for required in "$HOOK" "$COPY" "$RENDERER" "$WATCHER"; do
     if [[ ! -x "$required" ]]; then
         echo "codex-shell: required package command is missing: $required" >&2
         exit 127
@@ -170,13 +170,12 @@ nohup "$WATCHER" >/dev/null 2>&1 </dev/null &
 
 cat <<'BANNER'
 Manual handoff remains available:
-  c thisrepo        copy newest session for this Git repository
-  c thisrepo 1      copy previous session
-  c thisrepo list   list available repo-local Codex sessions
+  codex-handoff-copy                 copy newest repo-local session
+  codex-handoff-copy 1               copy previous session
+  codex-handoff-copy --list          list repo-local sessions
+  codex-handoff-copy --thread ID --turn ID
 
-Normal catcopy:
-  c file.txt
-  cat file.txt | c
+Clipboard delivery requires external catcopy, which owns c and catcopy.
 
 BANNER
 

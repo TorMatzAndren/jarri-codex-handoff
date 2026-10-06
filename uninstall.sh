@@ -5,8 +5,7 @@ PREFIX="${PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"
 
 rm -f \
-    "$BINDIR/c" \
-    "$BINDIR/catcopy" \
+    "$BINDIR/codex-handoff-copy" \
     "$BINDIR/codex-handoff-render" \
     "$BINDIR/codex-handoff-notify" \
     "$BINDIR/codex-handoff-watch" \

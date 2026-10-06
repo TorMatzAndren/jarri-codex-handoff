@@ -20,13 +20,13 @@ def git_root():
         )
     except Exception:
         raise SystemExit(
-            "ERROR: c thisrepo must be run inside a Git repository."
+            "ERROR: codex-handoff-copy requires a Git repository."
         )
 
     root = result.stdout.strip()
     if not root:
         raise SystemExit(
-            "ERROR: c thisrepo must be run inside a Git repository."
+            "ERROR: codex-handoff-copy requires a Git repository."
         )
 
     return Path(root).resolve()
