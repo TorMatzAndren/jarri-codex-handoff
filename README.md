@@ -109,6 +109,16 @@ transactional with SQLite.
 Codex itself remains the upstream Codex executable. Jarri Codex Handoff does
 not replace or modify the Codex program.
 
+By default, `codex-shell` resolves `codex` from `PATH`. To select a specific
+upstream executable explicitly, set `CODEX_BIN`:
+
+~~~bash
+CODEX_BIN=/path/to/codex codex-shell
+~~~
+
+Jarri Codex Handoff still does not install, replace, or shadow the `codex`
+command.
+
 If no `notify` setting exists, `codex-shell` configures the Jarri handoff hook.
 
 If the Jarri hook is already configured, the operation is idempotent.

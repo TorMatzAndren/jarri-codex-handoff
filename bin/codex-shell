@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v codex >/dev/null 2>&1; then
-    echo "codex-shell: Codex CLI was not found in PATH." >&2
-    echo "Install Codex first, then run codex-shell again." >&2
+CODEX_BIN="${CODEX_BIN:-codex}"
+
+if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
+    echo "codex-shell: Codex CLI was not found: $CODEX_BIN" >&2
+    echo "Install Codex or set CODEX_BIN to its executable." >&2
     exit 127
 fi
 
@@ -179,4 +181,4 @@ Clipboard delivery requires external catcopy, which owns c and catcopy.
 
 BANNER
 
-exec codex "$@"
+exec "$CODEX_BIN" "$@"

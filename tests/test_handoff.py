@@ -13,6 +13,7 @@ COPY = ROOT / "bin" / "codex-handoff-copy"
 NOTIFY = ROOT / "bin" / "codex-handoff-notify"
 DELIVERY = ROOT / "bin" / "handoff_delivery.py"
 WATCH = ROOT / "bin" / "codex-handoff-watch"
+SHELL = ROOT / "bin" / "codex-shell"
 
 
 def record(kind, payload):
@@ -476,6 +477,69 @@ class HandoffTests(unittest.TestCase):
         self.assertIn("turn_id=secret-turn", log)
         self.assertNotIn("TRANSCRIPT_SECRET", log)
 
+
+
+    def test_codex_shell_explicit_codex_bin_preserves_arguments(self):
+        bin_dir = self.base / "shell-bin"
+        bin_dir.mkdir()
+
+        launcher = bin_dir / "codex-shell"
+        launcher.write_bytes(SHELL.read_bytes())
+        launcher.chmod(0o755)
+
+        for name in (
+            "codex-handoff-notify",
+            "codex-handoff-copy",
+            "codex-handoff-render",
+            "codex-handoff-watch",
+        ):
+            helper = bin_dir / name
+            helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            helper.chmod(0o755)
+
+        explicit = self.base / "explicit-codex"
+        explicit.write_text(
+            "#!/bin/sh\n"
+            "printf 'EXPLICIT_CODEX\\n'\n"
+            "printf 'ARG=<%s>\\n' \"$@\"\n",
+            encoding="utf-8",
+        )
+        explicit.chmod(0o755)
+
+        env = {
+            **self.env,
+            "CODEX_HOME": str(self.base / "shell-home"),
+            "CODEX_BIN": str(explicit),
+        }
+        result = subprocess.run(
+            [str(launcher), "alpha", "two words"],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EXPLICIT_CODEX", result.stdout)
+        self.assertIn("ARG=<alpha>", result.stdout)
+        self.assertIn("ARG=<two words>", result.stdout)
+
+    def test_codex_shell_missing_explicit_codex_bin_returns_127(self):
+        env = {
+            **self.env,
+            "CODEX_BIN": str(self.base / "does-not-exist"),
+        }
+        result = subprocess.run(
+            [str(SHELL)],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 127)
+        self.assertIn(
+            f"Codex CLI was not found: {self.base / 'does-not-exist'}",
+            result.stderr,
+        )
 
 if __name__ == "__main__":
     unittest.main()
