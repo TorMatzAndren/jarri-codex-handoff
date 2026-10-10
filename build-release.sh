@@ -86,7 +86,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Maintainer: Jarri Systems
-Depends: bash, python3, git
+Depends: bash, python3, git, catcopy (>= 0.2.0)
 Description: Exact-turn Codex CLI clipboard handoff
  Automatically captures completed Codex CLI turns for
  repository-scoped handoff and recovery.

@@ -277,6 +277,31 @@ The current source installation includes changes made after
 version 0.2.5. Do not assume that older release artifacts
 contain those changes.
 
+## Debian package dependencies
+
+Jarri Codex Handoff uses Catcopy for clipboard delivery.
+
+The Debian package from version 0.3.1 declares:
+
+    Depends: bash, python3, git, catcopy (>= 0.2.0)
+
+Catcopy is distributed separately:
+
+https://github.com/TorMatzAndren/catcopy/releases/tag/v0.2.0
+
+Download both Debian packages into the same directory
+and install them together:
+
+    sudo apt install ./catcopy_0.2.0_all.deb ./jarri-codex-handoff_0.3.1_all.deb
+
+APT can then satisfy the Catcopy dependency using the
+provided local package.
+
+Installing Jarri Codex Handoff alone will not automatically
+download Catcopy from GitHub.
+
+Upstream Codex CLI must also be installed separately.
+
 ## Dependencies
 
 Required:
