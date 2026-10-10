@@ -258,8 +258,23 @@ class HandoffTests(unittest.TestCase):
         make_rollout(self.home, "race", self.repo, [("t1", "race")])
         env, _ = self.make_clip_env()
         commands = [["python3", str(DELIVERY), "deliver", "race", "t1", str(self.repo), source] for source in ("notify", "recovery")]
-        procs = [subprocess.Popen(c, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for c in commands]
-        self.assertEqual([p.wait() for p in procs], [0, 0])
+        procs = [
+            subprocess.Popen(
+                command,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for command in commands
+        ]
+        results = [proc.communicate(timeout=30) for proc in procs]
+        codes = [proc.returncode for proc in procs]
+        self.assertEqual(
+            codes,
+            [0, 0],
+            f"Concurrent delivery failed: {list(zip(('notify', 'recovery'), codes, results))}",
+        )
         self.assertEqual((self.base / "copies").read_text(), "x")
 
     def test_failed_delivery_is_retryable(self):
@@ -464,8 +479,23 @@ class HandoffTests(unittest.TestCase):
         make_rollout(self.home, "concurrent", self.repo, [("t1", "ONE")])
         env, _ = self.make_clip_env()
         commands = [["python3", str(DELIVERY), "deliver", "concurrent", "t1", str(self.repo), s] for s in ("notify", "recovery")]
-        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for cmd in commands]
-        self.assertEqual(sorted(p.wait() for p in procs), [0, 0])
+        procs = [
+            subprocess.Popen(
+                command,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for command in commands
+        ]
+        results = [proc.communicate(timeout=30) for proc in procs]
+        codes = [proc.returncode for proc in procs]
+        self.assertEqual(
+            sorted(codes),
+            [0, 0],
+            f"Registry concurrency failure: {list(zip(('notify', 'recovery'), codes, results))}",
+        )
         self.assertEqual((self.base / "copies").read_text(), "x")
 
     def test_delivery_logs_do_not_include_transcript_content(self):

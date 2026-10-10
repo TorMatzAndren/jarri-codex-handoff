@@ -37,8 +37,26 @@ def log(event, thread="-", turn="-", source="-"):
 def connect():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_PATH, timeout=15, isolation_level=None)
-    db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=15000")
+
+    # Concurrent first-time startup can race while enabling WAL.
+    # Retry only SQLite locking errors, within a bounded deadline.
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode not in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                db.close()
+                raise
+            if time.monotonic() >= deadline:
+                db.close()
+                raise
+            time.sleep(0.025)
     db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
         observed_at REAL NOT NULL, delivered_at REAL,
