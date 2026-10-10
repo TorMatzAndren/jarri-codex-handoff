@@ -3,3 +3,5 @@ __pycache__/
 *.deb
 *.tar.gz
 .DS_Store
+
+dist/
