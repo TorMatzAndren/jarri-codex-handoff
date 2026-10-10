@@ -5,30 +5,85 @@ repo-scoped handoff transcript suitable for another model or for archival.
 
 ## Quick start
 
-~~~bash
-codex-shell
-~~~
+Jarri Codex Handoff automatically copies completed Codex CLI turns
+to your clipboard, preserving the conversation, commands, and
+results needed to continue working with another AI assistant.
+
+It operates on Codex's persisted session records rather than
+scraping terminal output.
+
+### Fresh installation from source
+
+Prerequisites: Linux, Python 3, Bash, Git, an installed upstream
+Codex CLI, and a working clipboard backend.
+
+Install Catcopy first. It owns clipboard capture and transport:
+
+    git clone https://github.com/TorMatzAndren/catcopy.git
+    cd catcopy
+    sudo ./install.sh
+
+Then install Jarri Codex Handoff:
+
+    cd ..
+    git clone https://github.com/TorMatzAndren/jarri-codex-handoff.git
+    cd jarri-codex-handoff
+    sudo ./install.sh
+
+Verify command availability:
+
+    command -v codex
+    command -v catcopy
+    command -v codex-shell
+    command -v codex-handoff-copy
+
+All four commands should resolve before continuing.
+
+### Everyday workflow
+
+Enter a Git repository and launch Codex:
+
+    cd ~/projects/my-project
+    codex-shell
 
 Work normally in Codex.
 
-`codex-shell` also starts one per-user `codex-handoff-watch` recovery process;
-the watcher uses a state-directory lock so repeated launches reuse that
-process.
+When a turn completes, Jarri Codex Handoff copies the transcript
+for the exact thread and completed turn to the clipboard.
 
-After each completed Codex turn, the transcript for that exact Codex thread
-and completed turn is copied to the clipboard.
+Paste the result into ChatGPT, another model, a development
+discussion, or an archive.
 
-You can then paste it directly into another model or application without
-exiting Codex.
+The Codex session stays open.
 
-Manual and historical handoff controls remain available:
+The launcher also starts a per-user recovery observer. Repeated
+launches reuse the observer through a state-directory lock.
 
-~~~bash
-codex-handoff-copy                 # newest Codex session for this repository
-codex-handoff-copy 1               # previous session
-codex-handoff-copy --list          # list matching sessions
-codex-handoff-copy --thread ID --turn ID  # exact completed turn
-~~~
+### Manual fallback
+
+    codex-handoff-copy
+    codex-handoff-copy 1
+    codex-handoff-copy --list
+    codex-handoff-copy --thread THREAD_ID --turn TURN_ID
+
+The commands above work within a Git repository and select
+sessions belonging to that repository.
+
+### Upstream Codex selection
+
+By default, codex-shell resolves the upstream codex executable
+through PATH. If necessary, select it explicitly:
+
+    CODEX_BIN=/path/to/codex codex-shell
+
+Jarri Codex Handoff does not install or replace Codex.
+
+### Privacy
+
+Handoff transcripts can contain source code, terminal output,
+paths, and other sensitive development information.
+
+Review the clipboard contents before sharing them externally.
 
 ## What it does
 
@@ -183,31 +238,44 @@ The standalone catcopy project owns the commands `c` and `catcopy`.
 
 ## Installation
 
-### Debian package
+### Current source installation
 
-~~~bash
-sudo apt install ./jarri-codex-handoff_0.2.5_all.deb
-~~~
+For the latest implementation, install directly from this
+repository:
 
-### Portable tarball
+    git clone https://github.com/TorMatzAndren/jarri-codex-handoff.git
+    cd jarri-codex-handoff
+    sudo ./install.sh
 
-~~~bash
-tar -xzf jarri-codex-handoff-0.2.5.tar.gz
-cd jarri-codex-handoff-0.2.5
-sudo ./install.sh
-~~~
+The default installation prefix is /usr/local.
 
-User-local install:
+For a user-local installation:
 
-~~~bash
-PREFIX="$HOME/.local" ./install.sh
-~~~
+    PREFIX="$HOME/.local" ./install.sh
 
-Then start Codex through:
+Ensure the corresponding bin directory is on PATH.
 
-~~~bash
-codex-shell
-~~~
+This installer manages Jarri Codex Handoff commands only.
+It does not install upstream Codex or Catcopy.
+
+### Historical release artifacts
+
+The following commands apply specifically to release 0.2.5,
+not necessarily the current main branch.
+
+Debian package:
+
+    sudo apt install ./jarri-codex-handoff_0.2.5_all.deb
+
+Portable tarball:
+
+    tar -xzf jarri-codex-handoff-0.2.5.tar.gz
+    cd jarri-codex-handoff-0.2.5
+    sudo ./install.sh
+
+The current source installation includes changes made after
+version 0.2.5. Do not assume that older release artifacts
+contain those changes.
 
 ## Dependencies
 
@@ -222,6 +290,82 @@ Clipboard backend:
 - external standalone `catcopy` command (which selects its clipboard backend)
 
 Codex itself is not bundled.
+
+## Troubleshooting
+
+### Automatic clipboard delivery does not happen
+
+Check that both Codex and Catcopy are available:
+
+    command -v codex
+    command -v catcopy
+    command -v codex-shell
+
+Make sure a supported clipboard backend is installed and usable
+in the active graphical session.
+
+On X11, Catcopy can use xclip or xsel.
+On Wayland, it can use wl-copy.
+
+Start Codex with codex-shell, rather than launching the upstream
+codex command directly.
+
+### Another notification integration is configured
+
+codex-shell preserves an existing foreign Codex notify setting.
+
+It reports the conflict rather than overwriting another tool's
+configuration. Automatic notification-based handoff is not
+enabled in that situation.
+
+Resolve the ownership conflict deliberately. Do not discard
+other Codex configuration merely to enable this integration.
+
+### A completed turn was missed
+
+Inspect the recovery registry:
+
+    codex-handoff-watch --status
+
+Run a bounded recovery pass:
+
+    codex-handoff-watch --once
+
+Manual transcript retrieval is also available:
+
+    codex-handoff-copy --list
+    codex-handoff-copy
+
+The automatic startup recovery horizon is limited to recent
+completions. Manual historical selection remains available.
+
+### Clipboard updates unexpectedly repeat
+
+Check the recovery registry and diagnostic log.
+
+The delivery registry is stored under:
+
+    ${XDG_STATE_HOME:-$HOME/.local/state}/jarri-codex-handoff/
+
+The primary log is handoff.log; delivery.sqlite3 is the
+SQLite registry.
+
+Normal concurrent notification and recovery attempts coordinate
+through the registry. Clipboard mutation itself is not atomic
+with SQLite. A crash after copying but before recording success
+can therefore result in another copy after restart.
+
+### Test the installed implementation
+
+From the repository:
+
+    python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+To compare an installed helper with its source:
+
+    cmp bin/handoff_delivery.py /usr/local/bin/handoff_delivery.py
+
+Adjust that installed path if a different PREFIX was used.
 
 ## Architecture
 
@@ -323,6 +467,35 @@ Verification covered:
 - clipboard backend invocation verified with a controlled `xclip` sink
 
 The real desktop X11 clipboard path was also verified separately.
+
+### Current source verification (October 10, 2026)
+
+Source commit fc67815 was verified on the development host
+after installing the updated scripts.
+
+Verification included:
+
+- 32 passing automated tests
+- 30 consecutive passing full-suite runs (960 test executions)
+- concurrent notification and recovery delivery tests
+- installed command comparisons against repository sources
+- installed shared delivery helper matching repository source
+- clean Git history ancestry before publication
+
+A reproducible SQLite initialization race was identified in
+concurrent first-time database connections.
+
+The failure occurred while enabling WAL mode and produced
+sqlite3.OperationalError: database is locked.
+
+The source implementation now uses a bounded retry for SQLite
+locking errors during WAL initialization.
+
+The regression stress runs completed without recurrence.
+
+This verification does not establish a formal exactly-once
+guarantee across process crashes, nor does it constitute a
+fresh clean-room installation test of a new release package.
 
 ## Compatibility
 
