@@ -42,6 +42,10 @@ echo
 echo "--- EXPORT COMMITTED SOURCE ---"
 git archive --format=tar HEAD | tar -xf - -C "$SOURCE"
 
+# Catcopy owns c; exclude the legacy copy from release payloads.
+rm -f "$SOURCE/bin/c"
+test ! -e "$SOURCE/bin/c"
+
 echo
 echo "--- BUILD PORTABLE ARCHIVE ---"
 tar -C "$WORK" \
