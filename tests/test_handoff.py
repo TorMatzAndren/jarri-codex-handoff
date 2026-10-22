@@ -244,6 +244,13 @@ class HandoffTests(unittest.TestCase):
         row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT status,delivery_source FROM deliveries WHERE thread_id='once' AND turn_id='t1'").fetchone()
         self.assertEqual(row, ("delivered", "notify"))
 
+    def test_duplicate_completion_notifications_do_not_copy_twice(self):
+        make_rollout(self.home, "duplicate", self.repo, [("t1", "DUPLICATE")])
+        env, _ = self.make_clip_env()
+        self.assertEqual(self.invoke_deliver("duplicate", "t1", "notify", env=env).returncode, 0)
+        self.assertEqual(self.invoke_deliver("duplicate", "t1", "notify", env=env).returncode, 0)
+        self.assertEqual((self.base / "copies").read_text(), "x")
+
     def test_observer_once_recovers_missed_notify(self):
         make_rollout(self.home, "recover", self.repo, [("t1", "recovered")])
         env, clipboard = self.make_clip_env()
@@ -285,6 +292,129 @@ class HandoffTests(unittest.TestCase):
         env, _ = self.make_clip_env()
         retried = self.invoke_deliver("retry", "t1", "recovery", env=env)
         self.assertEqual(retried.returncode, 0, retried.stderr)
+
+    def test_retry_backoff_and_exhaustion_persist_in_registry(self):
+        import sqlite3
+        make_rollout(self.home, "bounded", self.repo, [("t1", "bounded")])
+        env = self.make_failed_clip_env()
+        self.assertEqual(self.invoke_deliver("bounded", "t1", env=env).returncode, 1)
+        db_path = self.base / "state/jarri-codex-handoff/delivery.sqlite3"
+        db = sqlite3.connect(db_path)
+        first = db.execute("SELECT attempts,next_attempt_at,failure_kind FROM deliveries WHERE thread_id='bounded'").fetchone()
+        self.assertEqual(first[0], 1)
+        self.assertGreater(first[1], time.time())
+        self.assertEqual(first[2], "transient")
+        for expected_attempt, expected_delay in ((2, 60), (3, 120)):
+            db.execute("UPDATE deliveries SET next_attempt_at=0 WHERE thread_id='bounded'")
+            db.commit()
+            self.assertEqual(self.invoke_deliver("bounded", "t1", "recovery", env=env).returncode, 1)
+            current = db.execute("SELECT attempts,next_attempt_at FROM deliveries WHERE thread_id='bounded'").fetchone()
+            self.assertEqual(current[0], expected_attempt)
+            self.assertGreaterEqual(current[1] - time.time(), expected_delay - 2)
+        # A restart or eager observer poll cannot bypass its persisted due time.
+        success_env, _ = self.make_clip_env()
+        self.assertEqual(self.invoke_deliver("bounded", "t1", "recovery", env=success_env).returncode, 0)
+        row = db.execute("SELECT attempts,status FROM deliveries WHERE thread_id='bounded'").fetchone()
+        self.assertEqual(row, (3, "failed"))
+        db.execute("UPDATE deliveries SET attempts=8,next_attempt_at=0 WHERE thread_id='bounded'")
+        db.commit(); db.close()
+        self.invoke_deliver("bounded", "t1", "recovery", env=success_env)
+        db = sqlite3.connect(db_path)
+        self.assertEqual(db.execute("SELECT status,attempts FROM deliveries WHERE thread_id='bounded'").fetchone(), ("exhausted", 8))
+        db.close()
+
+    def test_startup_does_not_replay_hundreds_of_old_failed_rows(self):
+        import sqlite3
+        env, _ = self.make_clip_env()
+        db_path = self.base / "state/jarri-codex-handoff/delivery.sqlite3"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["python3", str(DELIVERY), "watch", "--status"], env=env, check=True, capture_output=True)
+        db = sqlite3.connect(db_path)
+        for i in range(300):
+            db.execute("INSERT INTO deliveries(thread_id,turn_id,observed_at,status,attempts,last_error) VALUES(?,?,?,?,?,?)", (f"old-{i}", "turn", 1, "failed", 20, "historical failure"))
+        db.commit(); db.close()
+        make_rollout(self.home, "fresh", self.repo, [("new", "FRESH")])
+        result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final FRESH", (self.base / "clipboard").read_text())
+        db = sqlite3.connect(db_path)
+        self.assertEqual(db.execute("SELECT count(*) FROM deliveries WHERE thread_id LIKE 'old-%' AND status='failed'").fetchone()[0], 300)
+        db.close()
+
+    def test_missing_external_catcopy_is_permanent(self):
+        make_rollout(self.home, "no-catcopy", self.repo, [("t1", "NO_CATCOPY")])
+        bindir = self.base / "empty-bin"; bindir.mkdir()
+        (bindir / "python3").symlink_to("/usr/bin/python3")
+        (bindir / "git").symlink_to("/usr/bin/git")
+        env = {**self.env, "PATH": str(bindir), "XDG_STATE_HOME": str(self.base / "state")}
+        result = self.invoke_deliver("no-catcopy", "t1", env=env)
+        self.assertEqual(result.returncode, 1)
+        import sqlite3
+        row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT status,failure_kind,last_error FROM deliveries WHERE thread_id='no-catcopy'").fetchone()
+        self.assertEqual(row[:2], ("failed", "permanent"))
+        self.assertIn("external catcopy command not found", row[2])
+
+    def test_failed_exact_render_stays_failed_and_inspectable(self):
+        make_rollout(self.home, "render-failure", self.repo, [("known", "KNOWN")])
+        env, _ = self.make_clip_env()
+        result = self.invoke_deliver("render-failure", "absent", env=env)
+        self.assertEqual(result.returncode, 1)
+        import sqlite3
+        row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT status,last_error FROM deliveries WHERE thread_id='render-failure' AND turn_id='absent'").fetchone()
+        self.assertEqual(row[0], "failed")
+        self.assertIn("not found", row[1])
+
+    def test_old_sqlite_schema_migrates_without_losing_rows(self):
+        import sqlite3
+        state = self.base / "state/jarri-codex-handoff"
+        state.mkdir(parents=True)
+        path = state / "delivery.sqlite3"
+        db = sqlite3.connect(path)
+        db.executescript("CREATE TABLE deliveries(thread_id TEXT NOT NULL,turn_id TEXT NOT NULL,observed_at REAL NOT NULL,delivered_at REAL,delivery_source TEXT,status TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,claim_until REAL,last_error TEXT,PRIMARY KEY(thread_id,turn_id)); CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")
+        db.execute("INSERT INTO deliveries(thread_id,turn_id,observed_at,status,attempts,last_error) VALUES('kept','turn',?,'failed',4,'old reason')", (time.time(),))
+        db.commit(); db.close()
+        result = subprocess.run(["python3", str(DELIVERY), "watch", "--status"], env={**self.env, "XDG_STATE_HOME": str(self.base / "state")}, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        db = sqlite3.connect(path)
+        self.assertEqual(db.execute("SELECT status,attempts,last_error FROM deliveries WHERE thread_id='kept'").fetchone(), ("failed", 4, "old reason"))
+        columns = {row[1] for row in db.execute("PRAGMA table_info(deliveries)")}
+        self.assertTrue({"next_attempt_at", "failure_kind"}.issubset(columns))
+        db.close()
+
+    def test_delivery_has_no_obsolete_bundled_catcopy_path(self):
+        source = DELIVERY.read_text(encoding="utf-8")
+        self.assertNotIn("BASE / \"catcopy\"", source)
+        self.assertIn("codex-handoff-copy", source)
+
+    def test_delivery_timeout_is_failed_not_success(self):
+        make_rollout(self.home, "timeout", self.repo, [("t1", "TIMEOUT")])
+        env, _ = self.make_clip_env()
+        catcopy = Path(env["PATH"].split(":", 1)[0]) / "catcopy"
+        catcopy.write_text("#!/bin/sh\ncat >/dev/null\nsleep 2\n", encoding="utf-8"); catcopy.chmod(0o755)
+        env["JARRI_HANDOFF_DELIVERY_TIMEOUT"] = "0.05"
+        result = self.invoke_deliver("timeout", "t1", env=env)
+        self.assertEqual(result.returncode, 1)
+        import sqlite3
+        row = sqlite3.connect(self.base / "state/jarri-codex-handoff/delivery.sqlite3").execute("SELECT status,last_error FROM deliveries WHERE thread_id='timeout'").fetchone()
+        self.assertEqual(row[0], "failed")
+        self.assertIn("timed out", row[1])
+
+    def test_failed_older_recovery_cannot_overwrite_newer_clipboard(self):
+        import sqlite3
+        make_rollout(self.home, "older", self.repo, [("old", "OLD")])
+        make_rollout(self.home, "newer", self.repo, [("new", "NEW")])
+        failed_env = self.make_failed_clip_env()
+        self.assertEqual(self.invoke_deliver("older", "old", env=failed_env).returncode, 1)
+        env, clipboard = self.make_clip_env()
+        db_path = self.base / "state/jarri-codex-handoff/delivery.sqlite3"
+        db = sqlite3.connect(db_path)
+        db.execute("UPDATE deliveries SET status='failed',attempts=1,next_attempt_at=0 WHERE thread_id='older' AND turn_id='old'")
+        db.commit(); db.close()
+        self.assertEqual(self.invoke_deliver("newer", "new", env=env).returncode, 0)
+        newer_clip = clipboard.read_text()
+        self.assertIn("final NEW", newer_clip)
+        self.assertEqual(self.invoke_deliver("older", "old", "recovery", env=env).returncode, 0)
+        self.assertEqual(clipboard.read_text(), newer_clip)
 
     def test_observer_does_not_recopy_after_restart(self):
         make_rollout(self.home, "restart-delivered", self.repo, [("t1", "one")])
@@ -382,6 +512,14 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("final NEW_ROLLOUT", clipboard.read_text())
 
+    def test_pending_turns_in_one_rollout_deliver_in_event_order(self):
+        make_rollout(self.home, "ordered", self.repo, [("first", "FIRST"), ("second", "SECOND")])
+        env, clipboard = self.make_clip_env()
+        result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final SECOND", clipboard.read_text())
+        self.assertEqual((self.base / "copies").read_text(), "xx")
+
     def test_partial_jsonl_tail_waits_for_completion(self):
         path = make_rollout(self.home, "partial", self.repo, [])
         partial = json.dumps({"timestamp": "2026-10-04T00:00:00+00:00", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "partial-turn"}})
@@ -396,13 +534,16 @@ class HandoffTests(unittest.TestCase):
         rows = list(module.complete_rows(path))
         self.assertEqual(rows[-1][0], "partial-turn")
 
-    def test_recent_failed_attempt_is_recovered_after_restart(self):
+    def test_recorded_failure_is_not_replayed_after_restart_but_manual_recovery_works(self):
         make_rollout(self.home, "restart-pending", self.repo, [("t1", "recover-after-restart")])
         failed_env = self.make_failed_clip_env()
         self.assertEqual(self.invoke_deliver("restart-pending", "t1", env=failed_env).returncode, 1)
         env, clipboard = self.make_clip_env()
         result = subprocess.run([str(WATCH), "--once", "--grace", "0"], env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.base / "copies").exists())
+        manual = subprocess.run(["python3", str(DELIVERY), "recover", "restart-pending", "t1", str(self.repo)], env=env, text=True, capture_output=True)
+        self.assertEqual(manual.returncode, 0, manual.stderr)
         self.assertIn("final recover-after-restart", clipboard.read_text())
 
     def test_healthy_notify_during_grace_does_not_duplicate(self):

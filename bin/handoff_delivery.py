@@ -19,6 +19,10 @@ LOG_PATH = STATE_DIR / "handoff.log"
 LOG_MAX = 1024 * 1024
 GRACE = float(os.environ.get("JARRI_HANDOFF_GRACE", "3"))
 LEASE = 60
+MAX_ATTEMPTS = 8
+RETRY_BASE = 30.0
+RETRY_MAX = 3600.0
+DELIVERY_TIMEOUT = float(os.environ.get("JARRI_HANDOFF_DELIVERY_TIMEOUT", "30"))
 
 
 def log(event, thread="-", turn="-", source="-"):
@@ -64,6 +68,14 @@ def connect():
         attempts INTEGER NOT NULL DEFAULT 0, claim_until REAL,
         last_error TEXT, PRIMARY KEY(thread_id, turn_id))""")
     db.execute("CREATE INDEX IF NOT EXISTS deliveries_observed ON deliveries(observed_at)")
+    # Serialize additive migrations across simultaneous first connections.
+    db.execute("BEGIN IMMEDIATE")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(deliveries)")}
+    if "next_attempt_at" not in columns:
+        db.execute("ALTER TABLE deliveries ADD COLUMN next_attempt_at REAL")
+    if "failure_kind" not in columns:
+        db.execute("ALTER TABLE deliveries ADD COLUMN failure_kind TEXT")
+    db.execute("COMMIT")
     db.execute("""CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
     now = time.time()
@@ -87,13 +99,17 @@ def observe(thread, turn, source="recovery"):
     return row[0]
 
 
-def deliver(thread, turn, repo, source):
+def retry_delay(attempt):
+    return min(RETRY_BASE * (2 ** max(0, attempt - 1)), RETRY_MAX)
+
+
+def deliver(thread, turn, repo, source, manual=False):
     db = connect()
     now = time.time()
     try:
         db.execute("BEGIN IMMEDIATE")
         db.execute("INSERT OR IGNORE INTO deliveries(thread_id,turn_id,observed_at,status) VALUES(?,?,?,'observed')", (thread, turn, now))
-        row = db.execute("SELECT status,claim_until FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
+        row = db.execute("SELECT status,claim_until,attempts,next_attempt_at,failure_kind FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
         if row[0] == "delivered":
             db.execute("COMMIT")
             log("duplicate_noop", thread, turn, source)
@@ -102,7 +118,35 @@ def deliver(thread, turn, repo, source):
             db.execute("COMMIT")
             log("duplicate_noop", thread, turn, source)
             return 0
-        db.execute("UPDATE deliveries SET status='claiming',claim_until=?,attempts=attempts+1,delivery_source=?,last_error=NULL WHERE thread_id=? AND turn_id=?", (now + LEASE, source, thread, turn))
+        # Duplicate completion notifications are idempotent. Retryable failures
+        # are retried only by the durable recovery scheduler or explicit manual
+        # recovery, never by repeated hook delivery for the same identity.
+        if source == "notify" and row[0] in ("failed", "exhausted", "superseded"):
+            db.execute("COMMIT")
+            log("duplicate_noop", thread, turn, source)
+            return 0
+        if not manual and row[2] >= MAX_ATTEMPTS and source == "recovery":
+            db.execute("UPDATE deliveries SET status='exhausted' WHERE thread_id=? AND turn_id=?", (thread, turn))
+            db.execute("COMMIT")
+            log("retry_exhausted", thread, turn, source)
+            return 1
+        if not manual and row[4] == "permanent" and row[0] in ("failed", "exhausted"):
+            db.execute("COMMIT")
+            return 1
+        if not manual and source == "recovery" and row[3] and row[3] > now:
+            db.execute("COMMIT")
+            return 0
+        # Serialize the clipboard side effect globally and discard an older
+        # recovery attempt if a later turn has already won the clipboard.
+        if source == "recovery" and not manual:
+            this = db.execute("SELECT observed_at FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
+            latest = db.execute("SELECT MAX(observed_at) FROM deliveries WHERE status='delivered'").fetchone()[0]
+            if latest is not None and this[0] < latest:
+                db.execute("UPDATE deliveries SET status='superseded',last_error='newer turn already delivered' WHERE thread_id=? AND turn_id=?", (thread, turn))
+                db.execute("COMMIT")
+                log("recovery_superseded", thread, turn, source)
+                return 0
+        db.execute("UPDATE deliveries SET status='claiming',claim_until=?,attempts=attempts+1,delivery_source=?,last_error=NULL,failure_kind=NULL WHERE thread_id=? AND turn_id=?", (now + LEASE, source, thread, turn))
         db.execute("COMMIT")
     except Exception:
         if db.in_transaction:
@@ -112,11 +156,26 @@ def deliver(thread, turn, repo, source):
         db.close()
 
     log(f"{source}_delivery_claimed", thread, turn, source)
+    clip_lock = None
     try:
         valid = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True).stdout.strip()
         if not valid:
             raise RuntimeError("unresolved repository")
-        result = subprocess.run([str(BASE / "codex-handoff-copy"), "--thread", thread, "--turn", turn], cwd=valid, timeout=30, capture_output=True, text=True)
+        clip_lock = (STATE_DIR / "clipboard.lock").open("a+")
+        fcntl.flock(clip_lock, fcntl.LOCK_EX)
+        if source == "recovery" and not manual:
+            check = connect()
+            this_seen = check.execute("SELECT observed_at FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
+            newer = check.execute("SELECT 1 FROM deliveries WHERE status='delivered' AND observed_at>? LIMIT 1", (this_seen[0],)).fetchone()
+            check.close()
+            if newer:
+                status, error, kind = "superseded", "newer turn delivered before recovery copy", None
+                db = connect()
+                db.execute("UPDATE deliveries SET status='superseded',claim_until=NULL,last_error=? WHERE thread_id=? AND turn_id=?", (error, thread, turn))
+                db.close()
+                log("recovery_superseded", thread, turn, source)
+                return 0
+        result = subprocess.run([str(BASE / "codex-handoff-copy"), "--thread", thread, "--turn", turn], cwd=valid, timeout=DELIVERY_TIMEOUT, capture_output=True, text=True)
         if result.stdout:
             sys.stdout.write(result.stdout)
         if result.returncode:
@@ -127,17 +186,26 @@ def deliver(thread, turn, repo, source):
                 log("unresolved_session", thread, turn, source)
             elif "not found in session" in message:
                 log("unresolved_turn", thread, turn, source)
-            raise RuntimeError(f"codex-handoff-copy exit {result.returncode}")
-        status, error = "delivered", None
+            raise RuntimeError(f"codex-handoff-copy exit {result.returncode}: {message.strip()}")
+        status, error, kind = "delivered", None, None
     except Exception as exc:
         status, error = "failed", str(exc)[:240]
+        message = str(exc).lower()
+        kind = "permanent" if any(token in message for token in ("external catcopy command not found", "not found in path", "command not found", "not installed", "no canonical codex session", "not found in session", "does not belong to repository", "requires a git repository")) else "transient"
+    finally:
+        if clip_lock is not None:
+            fcntl.flock(clip_lock, fcntl.LOCK_UN)
+            clip_lock.close()
     db = connect()
     try:
         if status == "delivered":
             db.execute("UPDATE deliveries SET status='delivered',delivered_at=?,delivery_source=?,claim_until=NULL,last_error=NULL WHERE thread_id=? AND turn_id=?", (time.time(), source, thread, turn))
             log("delivery_success", thread, turn, source)
             return 0
-        db.execute("UPDATE deliveries SET status='failed',claim_until=NULL,last_error=? WHERE thread_id=? AND turn_id=?", (error, thread, turn))
+        row = db.execute("SELECT attempts FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
+        attempts = row[0] if row else MAX_ATTEMPTS
+        exhausted = attempts >= MAX_ATTEMPTS
+        db.execute("UPDATE deliveries SET status=?,claim_until=NULL,last_error=?,failure_kind=?,next_attempt_at=? WHERE thread_id=? AND turn_id=?", ("exhausted" if exhausted else "failed", error, kind, None if exhausted or kind == "permanent" else time.time() + retry_delay(attempts), thread, turn))
         log("delivery_failure", thread, turn, source)
         return 1
     finally:
@@ -208,16 +276,18 @@ def watcher(args):
 
     def scan_startup():
         nonlocal startup
-        cutoff = time.time() - horizon
         if not root.exists():
             return
-        for path in root.rglob("rollout-*.jsonl"):
+        for path in sorted(root.rglob("rollout-*.jsonl")):
             try:
                 st = path.stat()
-                if st.st_mtime < cutoff:
+                cutoff = time.time() - horizon
+                if st.st_mtime >= cutoff:
+                    # Recover only very recent completions that have never
+                    # been recorded. Existing failed rows remain manual-only.
+                    process(path, 0, cutoff)
+                else:
                     offsets[str(path)] = (st.st_ino, st.st_size, st.st_mtime_ns)
-                    continue
-                process(path, 0, cutoff)
             except OSError:
                 continue
         startup = False
@@ -248,10 +318,11 @@ def watcher(args):
             for turn, end in complete_rows(path, offset, cutoff):
                 newest = end
                 if turn:
-                    observe(thread, turn)
-                    pending.setdefault((thread, turn), time.monotonic() + args.grace)
-                    pending_repos[(thread, turn)] = actual_repo
-                    log("grace_scheduled", thread, turn, "recovery")
+                    prior = observe(thread, turn)
+                    if prior == "observed" or (not startup and prior == "failed"):
+                        pending.setdefault((thread, turn), time.monotonic() + args.grace)
+                        pending_repos[(thread, turn)] = actual_repo
+                        log("grace_scheduled", thread, turn, "recovery")
             offsets[key] = (st.st_ino, newest, st.st_mtime_ns)
             return offsets[key][1]
         except OSError:
@@ -266,7 +337,7 @@ def watcher(args):
             db = connect()
             row = db.execute("SELECT status FROM deliveries WHERE thread_id=? AND turn_id=?", (thread, turn)).fetchone()
             db.close()
-            if row and row[0] != "delivered":
+            if row and row[0] in ("observed", "failed"):
                 deliver(thread, turn, pending_repos[(thread, turn)], "recovery")
         return 0
 
@@ -275,7 +346,7 @@ def watcher(args):
             scan_startup()
         else:
             try:
-                paths = list(root.rglob("rollout-*.jsonl"))
+                paths = sorted(root.rglob("rollout-*.jsonl"))
             except OSError:
                 paths = []
             present = {str(p) for p in paths}
@@ -298,15 +369,26 @@ def watcher(args):
             if now >= due:
                 thread, turn = identity
                 db = connect()
-                row = db.execute("SELECT status FROM deliveries WHERE thread_id=? AND turn_id=?", identity).fetchone()
+                row = db.execute("SELECT status,next_attempt_at,failure_kind,attempts FROM deliveries WHERE thread_id=? AND turn_id=?", identity).fetchone()
                 db.close()
-                if row and row[0] != "delivered":
+                if row and row[0] in ("exhausted", "superseded") or (row and row[2] == "permanent"):
+                    pending.pop(identity, None)
+                    pending_repos.pop(identity, None)
+                    continue
+                if row and row[0] in ("observed", "failed") and (not row[1] or row[1] <= time.time()):
                     deliver(thread, turn, args.repo or pending_repos.get(identity) or repo_for(root, thread), "recovery")
                 elif row and row[0] == "delivered":
                     pending.pop(identity, None)
                     pending_repos.pop(identity, None)
                     continue
-                pending[identity] = now + args.retry
+                db = connect()
+                next_row = db.execute("SELECT status,next_attempt_at,failure_kind,attempts FROM deliveries WHERE thread_id=? AND turn_id=?", identity).fetchone()
+                db.close()
+                if not next_row or next_row[0] in ("delivered", "exhausted", "superseded") or next_row[2] == "permanent" or next_row[3] >= MAX_ATTEMPTS:
+                    pending.pop(identity, None)
+                    pending_repos.pop(identity, None)
+                else:
+                    pending[identity] = max(now + 1, now + (next_row[1] - time.time() if next_row[1] else RETRY_BASE))
         time.sleep(args.poll)
 
 
@@ -323,6 +405,8 @@ def main():
     subs = p.add_subparsers(dest="command", required=True)
     d = subs.add_parser("deliver")
     d.add_argument("thread"); d.add_argument("turn"); d.add_argument("repo"); d.add_argument("source", choices=("notify", "recovery"))
+    m = subs.add_parser("recover", help="explicitly retry one historical failed turn")
+    m.add_argument("thread"); m.add_argument("turn"); m.add_argument("repo")
     w = subs.add_parser("watch")
     w.add_argument("--sessions", default=str(Path.home() / ".codex/sessions"))
     w.add_argument("--repo")
@@ -335,6 +419,8 @@ def main():
     args = p.parse_args()
     if args.command == "deliver":
         return deliver(args.thread, args.turn, args.repo, args.source)
+    if args.command == "recover":
+        return deliver(args.thread, args.turn, args.repo, "recovery", manual=True)
     if args.status:
         db = connect()
         for row in db.execute("SELECT status,COUNT(*) FROM deliveries GROUP BY status"):

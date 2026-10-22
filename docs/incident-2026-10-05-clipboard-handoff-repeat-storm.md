@@ -4,7 +4,7 @@ Date: 2026-10-05
 Author: Matz
 Type: incident
 Subsystem: codex-handoff
-Updated: 2026-10-05
+Updated: 2026-10-22
 Revision: 1
 
 ---
@@ -164,3 +164,36 @@ observation still references it.
 A consistent pre-cleanup SQLite backup was written to:
 
     /tmp/clipboard_register-before-codex-repeat-cleanup-20261005.sqlite3
+
+# Follow-up: stale observer recovery failure (2026-10-22)
+
+The observer launched on October 5 remained alive through October 22. Its
+already-loaded Python code referenced the obsolete bundled executable path
+`bin/catcopy`, which had since been removed. Editing or installing current
+scripts does not update code already loaded in a long-running process.
+
+The current notify configuration remained present and the independent notify
+hook continued to be invoked. Logs show a Jarri Chat delivery succeeding at
+18:07:38 on October 22 while the old observer was separately failing recovery
+deliveries. The stale observer had no bounded retry state: its in-memory
+pending map retried every five seconds, while the database only recorded each
+failure. Repeated launches also could not replace that process because of its
+watcher lock.
+
+The delivery implementation now uses the maintained `codex-handoff-copy`
+entry point for both notify and recovery. That command locates the external
+Catcopy executable through PATH. SQLite migrations add durable retry metadata
+without replacing existing delivery rows. Recovery is capped at eight
+attempts with exponential delay from 30 seconds to one hour; permanent backend
+or configuration failures stop automatic retry. A watcher startup baselines
+existing rollout files and considers only recent, unrecorded completions, so
+prior failed records are not automatically replayed to the clipboard. An
+operator can inspect and explicitly retry a selected historical failure via
+`handoff_delivery.py recover THREAD TURN REPOSITORY`.
+
+Safe restart procedure: stop the old watcher, verify no watcher remains,
+confirm `codex-handoff-copy` and `catcopy` resolve through PATH, inspect the
+registry and logs, then start the maintained watcher. Do not erase the SQLite
+registry to clear retry state. For a historical failure, review its recorded
+error and choose one thread and turn for explicit manual recovery. Canonical
+Codex session JSONL remains read-only throughout.

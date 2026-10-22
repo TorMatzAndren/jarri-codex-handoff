@@ -139,7 +139,8 @@ start it directly instead, run:
 codex-handoff-watch
 ~~~
 
-`codex-handoff-watch --once` performs a bounded startup recovery pass, and
+`codex-handoff-watch --once` performs a bounded pass for recent, previously
+unrecorded completions, and
 `codex-handoff-watch --status` shows registry counts. The normal watcher polls
 rollouts once per second. Startup recovery considers only task completions from
 the previous 10 minutes; registry rows older than 180 days are pruned.
@@ -156,7 +157,11 @@ watcher is the recovery path for persisted completions that lack a successful
 notify delivery. Both paths call the same delivery primitive and SQLite
 registry under `$XDG_STATE_HOME/jarri-codex-handoff/delivery.sqlite3`. The
 registry prevents duplicate attempts from reaching the clipboard after a
-successful delivery and makes failed attempts retryable. A process crash in
+successful delivery and records bounded recovery retry state. Automatic
+recovery makes at most 8 attempts, starting at 30 seconds and doubling to a
+one-hour maximum. Missing Catcopy, missing commands, and invalid session or
+repository configuration are marked permanent and require operator action.
+A process crash in
 the narrow interval after clipboard mutation and before the registry commit
 can still cause another copy after restart; clipboard mutation is not
 transactional with SQLite.
@@ -197,15 +202,34 @@ ignores other event types and malformed or unresolved identities.
 
 ### `codex-handoff-watch`
 
-Observes persisted `task_complete` records and recovers turns after a 3-second
-grace period. It polls known rollout files incrementally and periodically
-discovers new files. It uses only Python's standard library. The default
-startup recovery horizon is 10 minutes to prevent historical clipboard
-flooding. Set `JARRI_HANDOFF_GRACE` to change the default grace period, or use
-`--grace`, `--horizon`, `--poll`, and `--retry` for operator control.
+Observes persisted `task_complete` records and recovers newly completed turns
+after a 3-second grace period. At startup it only considers recent completion
+records that are absent from the registry; it never replays recorded historical
+failures automatically. Retry count and next-attempt time are stored in the
+SQLite registry and survive restart. The retry schedule is capped at 8 attempts
+(30 seconds, doubling to a one-hour maximum); exhausted and permanent failures
+stay visible for diagnosis and do not block newer turns. `--retry` is retained
+as a compatibility option but does not override the durable schedule.
 
-The shared delivery path invokes `codex-handoff-copy` directly, so shell aliases
-or functions cannot interfere with turn-complete handoff.
+When a scan finds several completions together, it processes rollout paths in
+sorted path order and turns in their JSONL event order. Clipboard writes are
+serialized, so the last successful turn in that order leaves its cumulative
+transcript on the clipboard.
+
+Notify and recovery both invoke the maintained `codex-handoff-copy`, which uses
+the installed external `catcopy` executable found through PATH. No bundled
+Catcopy executable is used.
+
+To deliberately retry a historical failed turn, inspect its thread and turn
+IDs in the registry, then run from the repository:
+
+~~~bash
+python3 /usr/local/bin/handoff_delivery.py recover THREAD_ID TURN_ID /path/to/repo
+~~~
+
+Use the matching installed helper path if a different installation prefix was
+used. This sends the exact selected historical transcript through the normal
+renderer and external Catcopy path; it does not alter canonical JSONL records.
 
 ### `codex-handoff-render`
 
@@ -352,7 +376,7 @@ Inspect the recovery registry:
 
     codex-handoff-watch --status
 
-Run a bounded recovery pass:
+Run a bounded recovery pass for recent completions not yet in the registry:
 
     codex-handoff-watch --once
 
@@ -363,6 +387,11 @@ Manual transcript retrieval is also available:
 
 The automatic startup recovery horizon is limited to recent
 completions. Manual historical selection remains available.
+
+Previously recorded failures are not replayed on startup. Review their
+`last_error`, `attempts`, and status in the SQLite registry, fix any backend or
+configuration issue, then use the explicit `handoff_delivery.py recover`
+command for one selected thread and turn.
 
 ### Clipboard updates unexpectedly repeat
 
